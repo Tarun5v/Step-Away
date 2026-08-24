@@ -117,9 +117,6 @@ EYE_RULE_MINUTES = 20
 DAILY_WATER_GOAL = 8
 DRINK_GESTURE_SECONDS = 1.5
 DRINK_DEDUP_SECONDS = 4 * 60
-WRIST_MOUTH_RATIO = 0.6
-MIN_DRINK_RADIUS = 0.16
-SHOULDER_GATE_MARGIN = 0.12
 BREAK_THRESHOLD_SECONDS = 300
 BREAK_AWAY_SECONDS = 60
 DEMO_BREAK_AWAY_SECONDS = 5
@@ -462,87 +459,39 @@ def face_in_frame(frame) -> bool:
     return bool(result.multi_face_landmarks)
 
 
-_pose_lock = threading.Lock()
-_pose = None
+_hands_lock = threading.Lock()
+_hands = None
 
 
-def _get_pose():
-    """Lazily create the shared lightweight pose model for drink detection."""
-    global _pose
-    with _pose_lock:
-        if _pose is None:
+def _get_hands():
+    """Lazily create the shared hand tracker used for drink detection."""
+    global _hands
+    with _hands_lock:
+        if _hands is None:
             import mediapipe as mp
 
             with QuietStderr():
-                _pose = mp.solutions.pose.Pose(
+                _hands = mp.solutions.hands.Hands(
                     static_image_mode=False,
+                    max_num_hands=1,
                     model_complexity=0,
                     min_detection_confidence=0.5,
                 )
-    return _pose
-
-
-def _gesture_metrics(landmarks) -> dict:
-    """Measure drinking signals from pose landmarks and return the verdict.
-
-    The wrist-to-face distance is scaled by shoulder width but floored at
-    an absolute minimum, because tight head-and-shoulders webcam framing
-    can shrink the measured shoulder span to almost nothing. The nose
-    anchors a second check for grips that hide the mouth corners, and
-    low-visibility wrists (cropped or occluded) are skipped.
-    """
-    left_sh = landmarks[11]
-    right_sh = landmarks[12]
-    span = max(abs(right_sh.x - left_sh.x), 1e-4)
-    shoulder_line = max(left_sh.y, right_sh.y)
-    mouth_x = (landmarks[9].x + landmarks[10].x) / 2
-    mouth_y = (landmarks[9].y + landmarks[10].y) / 2
-    nose = landmarks[0]
-    radius = max(WRIST_MOUTH_RATIO * span, MIN_DRINK_RADIUS)
-
-    best = None
-    for index, side in ((15, "L"), (16, "R")):
-        wrist = landmarks[index]
-        visibility = getattr(wrist, "visibility", 1.0)
-        d_mouth = ((wrist.x - mouth_x) ** 2 + (wrist.y - mouth_y) ** 2) ** 0.5
-        d_nose = ((wrist.x - nose.x) ** 2 + (wrist.y - nose.y) ** 2) ** 0.5
-        raised = wrist.y < shoulder_line + SHOULDER_GATE_MARGIN
-        close = (d_mouth < radius or d_nose < radius) and raised
-        if close:
-            return {
-                "drinking": True,
-                "side": side,
-                "d_mouth": round(d_mouth, 3),
-                "d_nose": round(d_nose, 3),
-                "span": round(span, 3),
-            }
-        if best is None or min(d_mouth, d_nose) < best["min_d"]:
-            best = {
-                "min_d": min(d_mouth, d_nose),
-                "side": side,
-                "vis": round(visibility, 2),
-                "raised": raised,
-            }
-    return {
-        "drinking": False,
-        "side": best["side"] if best else "-",
-        "d_mouth": round(best["min_d"], 3) if best else -1,
-        "span": round(span, 3),
-        "vis": best["vis"] if best else 0.0,
-        "raised": best["raised"] if best else False,
-    }
-
-
-def _is_drinking(landmarks) -> bool:
-    return _gesture_metrics(landmarks)["drinking"]
+    return _hands
 
 
 class DrinkDetector:
-    """Watches for the sustained hand-to-mouth gesture of drinking.
+    """Detects drinking as a raised hand near the face.
 
-    A brief face touch does not count; the pose must hold for
-    DRINK_GESTURE_SECONDS before consider() fires once and re-arms.
+    Uses MediaPipe Hands (purpose-built for hands, reliable even beside a
+    face) rather than full-body pose, whose wrists are unreliable in tight
+    head-and-shoulders webcam framing. A hand whose centre sits in the
+    upper part of the frame counts as the drinking gesture; desk-level
+    typing hands never do. Progress accumulates over DRINK_GESTURE_SECONDS
+    and decays gently between sips instead of resetting.
     """
+
+    HAND_RAISE_ZONE = 0.55
 
     def __init__(self):
         self.sustained = 0.0
@@ -552,24 +501,26 @@ class DrinkDetector:
         import cv2 as _cv2
 
         try:
-            pose = _get_pose()
+            hands = _get_hands()
             image = _cv2.cvtColor(frame, _cv2.COLOR_BGR2RGB)
             with QuietStderr():
-                result = pose.process(image)
-        except Exception:
+                result = hands.process(image)
+        except Exception as error:
             self.sustained = 0.0
-            self.last_obs = {"error": True}
+            self.last_obs = {"error": f"{type(error).__name__}: {error}"[:140]}
             return False
 
-        landmarks = (
-            result.pose_landmarks.landmark if result.pose_landmarks else None
-        )
-        if landmarks is None:
-            self.last_obs = {"person": False}
+        hand_lists = result.multi_hand_landmarks
+        if not hand_lists:
+            self.last_obs = {"hand": False}
+            drinking = False
         else:
-            self.last_obs = _gesture_metrics(landmarks)
+            points = hand_lists[0].landmark
+            centre_y = sum(point.y for point in points) / len(points)
+            raised = centre_y < self.HAND_RAISE_ZONE
+            self.last_obs = {"hand": True, "y": round(centre_y, 2), "raised": raised}
+            drinking = raised
 
-        drinking = bool(self.last_obs.get("drinking"))
         if drinking:
             self.sustained += min(max(seconds, 0.0), 2.0)
         else:
@@ -1185,16 +1136,21 @@ class StepAwayApp:
                 print(f"Desk empty - locking in {remaining}s. Hop back in view to cancel.")
                 self.warned = True
 
-    def _warm_pose_model(self) -> None:
-        """Load the pose model off the main loop so drink checks never stall."""
+    def _warm_drink_model(self) -> None:
+        """Load the hand model on the main thread before loops start.
+
+        MediaPipe binds its compute context to the creating thread on
+        macOS, so the model must be created and first used here rather
+        than in a helper thread, or every later call would fail.
+        """
         try:
             import numpy as np
 
-            _get_pose().process(np.zeros((64, 64, 3), dtype=np.uint8))
+            _get_hands().process(np.zeros((64, 64, 3), dtype=np.uint8))
             stamp = time.strftime("%H:%M:%S")
             print(f"[{stamp}] Drink detector ready.")
         except Exception as error:
-            print(f"Drink detector unavailable: {error.__class__.__name__}")
+            print(f"Drink detector unavailable: {error.__class__.__name__}: {error}")
 
     def _consider_drink(self, now: float) -> None:
         """Run pose detection at most once a second; log deduped drinks."""
@@ -1370,7 +1326,7 @@ class StepAwayApp:
 
     def run(self) -> int:
         print("Step-Away is starting up. Press Ctrl+C to quit.")
-        threading.Thread(target=self._warm_pose_model, daemon=True).start()
+        self._warm_drink_model()
         if self.stretch_interval == DEMO_STRETCH_SECONDS:
             print(
                 f"Demo mode: break screen every {DEMO_STRETCH_SECONDS}s "
