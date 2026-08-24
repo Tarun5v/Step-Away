@@ -25,7 +25,6 @@ PRESENCE_MIN_HITS = 2
 MIN_DETECTION_CONFIDENCE = 0.4
 DEMO_STRETCH_SECONDS = 40
 DEMO_EYE_REST_SECONDS = 10
-DEMO_HYDRATION_SECONDS = 25
 DRAIN_GRABS = 6
 PREVIEW_TARGET_FPS = 60
 FPS_SMOOTHING = 0.9
@@ -71,8 +70,9 @@ LOCK_COMMAND_TIMEOUT_SECONDS = 5
 LOCK_RETRY_SECONDS = 30
 FOCUS_REMINDER_MINUTES = 50
 EYE_RULE_MINUTES = 20
-HYDRATION_INTERVAL_MINUTES = 45
 BREAK_THRESHOLD_SECONDS = 300
+BREAK_OVERLAY_SECONDS = 30
+EYE_REST_OVERLAY_SECONDS = 20
 DAY_DEFAULTS = {
     "focus_seconds": 0,
     "reminders": 0,
@@ -271,6 +271,101 @@ def send_stretch_notification(message: str = None) -> None:
         subprocess.run(["osascript", "-e", script], capture_output=True)
 
 
+def show_break_overlay(title: str, subtitle: str, duration_seconds: float) -> None:
+    """Take over the screen with a blurred, Apple-style break card.
+
+    Falls back to a regular notification when the native UI stack is
+    unavailable. Blocks until the user clicks/presses a key or the
+    duration elapses.
+    """
+    try:
+        import AppKit
+        from Foundation import NSObject, NSMakeRect  # noqa: F401
+
+        NSMakeRect  # keep linters honest about the conditional import
+    except Exception:
+        send_stretch_notification(message=f"{title}. {subtitle}")
+        return
+
+    app = AppKit.NSApplication.sharedApplication()
+    screen = AppKit.NSScreen.mainScreen().frame()
+
+    class OverlayWindow(AppKit.NSWindow):
+        def sendEvent_(self, event):
+            if event.type() in (
+                AppKit.NSKeyDown,
+                AppKit.NSLeftMouseDown,
+                AppKit.NSRightMouseDown,
+            ):
+                AppKit.NSApplication.sharedApplication().stopModal()
+                return
+            super().sendEvent_(event)
+
+    class Coordinator(NSObject):
+        def tick_(self, timer):
+            AppKit.NSApplication.sharedApplication().stopModal()
+
+    window = OverlayWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+        NSMakeRect(0, 0, screen.size.width, screen.size.height),
+        AppKit.NSBorderlessWindowMask,
+        AppKit.NSBackingStoreBuffered,
+        False,
+    )
+    window.setLevel_(AppKit.NSScreenSaverWindowLevel)
+    window.setOpaque_(False)
+    window.setBackgroundColor_(AppKit.NSColor.clearColor())
+    window.setCollectionBehavior_(
+        AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces
+    )
+
+    blur = AppKit.NSVisualEffectView.alloc().initWithFrame_(
+        NSMakeRect(0, 0, screen.size.width, screen.size.height)
+    )
+    blur.setMaterial_(AppKit.NSVisualEffectMaterialHUDWindow)
+    blur.setBlendingMode_(AppKit.NSVisualEffectBlendingModeBehindWindow)
+    blur.setState_(AppKit.NSVisualEffectStateActive)
+
+    def centered_label(y_ratio, height, text, font_size, alpha):
+        field = AppKit.NSTextField.alloc().initWithFrame_(
+            NSMakeRect(0, screen.size.height * y_ratio, screen.size.width, height)
+        )
+        field.setStringValue_(text)
+        field.setFont_(AppKit.NSFont.boldSystemFontOfSize_(font_size))
+        field.setAlignment_(AppKit.NSTextAlignmentCenter)
+        color = AppKit.NSColor.whiteColor()
+        field.setTextColor_(
+            color.colorWithAlphaComponent_(alpha)
+        )
+        field.setBezeled_(False)
+        field.setDrawsBackground_(False)
+        field.setEditable_(False)
+        field.setSelectable_(False)
+        return field
+
+    content = window.contentView()
+    content.addSubview_(blur)
+    content.addSubview_(centered_label(0.58, 70, title, 48, 1.0))
+    content.addSubview_(centered_label(0.50, 40, subtitle, 24, 0.85))
+    content.addSubview_(centered_label(0.10, 30, "Press any key or click to continue", 15, 0.55))
+
+    coordinator = Coordinator.alloc().init()
+    from Foundation import NSTimer, NSRunLoop, NSModalPanelRunLoopMode, NSDefaultRunLoopMode
+
+    timer = NSTimer.timerWithTimeInterval_target_selector_userInfo_repeats_(
+        duration_seconds, coordinator, "tick:", None, False
+    )
+    for mode in (NSModalPanelRunLoopMode, NSDefaultRunLoopMode):
+        NSRunLoop.currentRunLoop().addTimer_forMode_(timer, mode)
+
+    window.makeKeyAndOrderFront_(None)
+    app.activateIgnoringOtherApps_(True)
+    try:
+        app.runModalForWindow_(window)
+    finally:
+        timer.invalidate()
+        window.orderOut_(None)
+
+
 def format_duration(total_seconds: int) -> str:
     minutes, seconds = divmod(int(total_seconds), 60)
     hours, minutes = divmod(minutes, 60)
@@ -459,7 +554,6 @@ class StepAwayApp:
         self.warned = False
         self.focus_start = None
         self.eye_rest_start = None
-        self.hydrate_start = None
         self.break_counted = True
         self.next_lock_attempt = 0.0
         self.last_tick = time.time()
@@ -468,11 +562,13 @@ class StepAwayApp:
         if demo:
             self.stretch_interval = DEMO_STRETCH_SECONDS
             self.eye_rest_interval = DEMO_EYE_REST_SECONDS
-            self.hydrate_interval = DEMO_HYDRATION_SECONDS
+            self.break_overlay_duration = 8
+            self.eye_overlay_duration = 5
         else:
             self.stretch_interval = FOCUS_REMINDER_MINUTES * 60
             self.eye_rest_interval = EYE_RULE_MINUTES * 60
-            self.hydrate_interval = HYDRATION_INTERVAL_MINUTES * 60
+            self.break_overlay_duration = BREAK_OVERLAY_SECONDS
+            self.eye_overlay_duration = EYE_REST_OVERLAY_SECONDS
 
     def _update_security(self, now: float) -> None:
         if self.monitor.face_present:
@@ -511,31 +607,29 @@ class StepAwayApp:
             if self.focus_start is None:
                 self.focus_start = now
             elif now - self.focus_start >= self.stretch_interval:
-                send_stretch_notification()
                 self.stats.record_reminder()
                 stamp = time.strftime("%H:%M:%S")
-                minutes = FOCUS_REMINDER_MINUTES
-                print(f"[{stamp}] {minutes} minutes of focus - stretch nudge sent.")
-                self.focus_start = now
+                print(f"[{stamp}] Focus limit reached - showing break screen.")
+                show_break_overlay(
+                    "Time for a break",
+                    "You've reached your focus limit. Stand up, stretch, breathe.",
+                    self.break_overlay_duration,
+                )
+                self.focus_start = time.time()
 
             if self.eye_rest_start is None:
                 self.eye_rest_start = now
             elif now - self.eye_rest_start >= self.eye_rest_interval:
-                send_stretch_notification(
-                    message="20-20-20: look at something 6 metres away for 20 seconds."
-                )
                 self.stats.record_eye_rest()
                 stamp = time.strftime("%H:%M:%S")
-                print(f"[{stamp}] 20-20-20 eye-rest nudge sent.")
-                self.eye_rest_start = now
+                print(f"[{stamp}] 20-20-20 - showing eye-rest screen.")
+                show_break_overlay(
+                    "20-20-20",
+                    "Look at something 6 metres away for 20 seconds.",
+                    self.eye_overlay_duration,
+                )
+                self.eye_rest_start = time.time()
 
-            if self.hydrate_start is None:
-                self.hydrate_start = now
-            elif now - self.hydrate_start >= self.hydrate_interval:
-                send_stretch_notification(message="Time to sip some water - stay hydrated!")
-                stamp = time.strftime("%H:%M:%S")
-                print(f"[{stamp}] Hydration nudge sent (press w in preview to log a glass).")
-                self.hydrate_start = now
             return
 
         if self.absent_since is None:
@@ -552,7 +646,6 @@ class StepAwayApp:
         if not self.monitor.face_present:
             self.focus_start = None
             self.eye_rest_start = None
-            self.hydrate_start = None
             self.break_counted = False
 
     def _announce(self, present: bool) -> None:
@@ -606,9 +699,8 @@ class StepAwayApp:
         print("Step-Away is starting up. Press Ctrl+C to quit.")
         if self.stretch_interval == DEMO_STRETCH_SECONDS:
             print(
-                f"Demo mode: stretch every {DEMO_STRETCH_SECONDS}s, "
-                f"eye rest every {DEMO_EYE_REST_SECONDS}s, "
-                f"water every {DEMO_HYDRATION_SECONDS}s."
+                f"Demo mode: break screen every {DEMO_STRETCH_SECONDS}s, "
+                f"eye rest every {DEMO_EYE_REST_SECONDS}s."
             )
         print(f"Streak so far: {self.stats.current_streak()} day(s).")
         if not self.stats.setup_acknowledged:

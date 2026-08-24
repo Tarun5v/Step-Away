@@ -8,12 +8,13 @@ stretch when you have been focused for too long.
 
 - **Auto-lock security** - after 5 seconds away you get a warning; if you are
   still gone at the 10-second mark, the screen locks with `Cmd+Ctrl+Q`.
-- **Wellness nudges** - a desktop notification after 50 minutes of
-  uninterrupted focus so you remember to stand up and stretch.
-- **20-20-20 eye rule** - every 20 minutes at the desk you get an eye-rest
-  nudge: look 6 metres away for 20 seconds to fight eye strain.
-- **Hydration tracking** - drink-water nudges every 45 minutes, and press `w`
-  in the preview window to log each glass you drink.
+- **Wellness breaks** - after 50 minutes of uninterrupted focus, the screen
+  fades into a full-screen blurred break card, Screen Time style: "You've
+  reached your focus limit. Stand up, stretch, breathe."
+- **20-20-20 eye rule** - every 20 minutes at the desk a blurred eye-rest
+  screen appears: look 6 metres away for 20 seconds to fight eye strain.
+- **Hydration tracking** - press `w` in the preview window to log each glass
+  of water you drink; totals live in your daily stats.
 - **Break tracking** - stays away long enough (5+ minutes) and it counts as a
   logged break.
 - **Daily stats & streaks** - focus time, nudges, breaks and day streaks are
@@ -71,8 +72,9 @@ Tune the behaviour by editing the constants at the top of `main.py`:
 | `LOCK_RETRY_SECONDS`     | `30`    | Delay between lock retries when locking fails |
 | `PREVIEW_TARGET_FPS`     | `60`    | Frame rate target for the `--preview` window  |
 | `FOCUS_REMINDER_MINUTES` | `50`    | Uninterrupted focus minutes per stretch nudge |
-| `EYE_RULE_MINUTES`       | `20`    | Minutes between 20-20-20 eye-rest nudges      |
-| `HYDRATION_INTERVAL_MINUTES` | `45`| Minutes between drink-water nudges            |
+| `EYE_RULE_MINUTES`       | `20`    | Minutes between 20-20-20 eye-rest screens     |
+| `BREAK_OVERLAY_SECONDS`  | `30`    | Auto-dismiss time of the focus break screen   |
+| `EYE_REST_OVERLAY_SECONDS`| `20`   | How long the eye-rest screen stays up         |
 | `BREAK_THRESHOLD_SECONDS`| `300`   | Away-time that counts as a real break         |
 
 ## Privacy
