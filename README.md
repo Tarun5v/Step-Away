@@ -33,6 +33,12 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+Verify that everything is in place (camera, face model, permissions):
+
+```bash
+python main.py --doctor
+```
+
 ## Usage
 
 ```bash

@@ -31,6 +31,16 @@ DEBUG_SNAPSHOT_LIMIT = 40
 MOTION_RESIZE_WIDTH = 160
 PREVIEW_WINDOW_TITLE = "Step-Away camera"
 
+FIRST_RUN_CHECKLIST = """
+First-time setup checklist:
+  1. Camera        - System Settings > Privacy & Security > Camera:
+                     enable your terminal app (presence detection)
+  2. Accessibility - System Settings > Privacy & Security > Accessibility:
+                     enable your terminal app (auto-lock keystroke)
+  3. Notifications - allow them when macOS first asks (stretch reminders)
+Re-check anytime with: python main.py --doctor
+"""
+
 
 class PresenceVote:
     """Rolling-window vote over raw face readings to smooth flicker."""
@@ -235,10 +245,11 @@ def lock_screen() -> bool:
     return True
 
 
-def send_stretch_notification() -> None:
+def send_stretch_notification(message: str = None) -> None:
     """Post a desktop reminder to stand up and stretch."""
     title = "Step-Away"
-    message = "You have been focused for a while. Time to stretch and hydrate!"
+    if message is None:
+        message = "You have been focused for a while. Time to stretch and hydrate!"
     try:
         from plyer import notification
 
@@ -264,6 +275,7 @@ class StatsStore:
     def __init__(self, path: str = STATS_FILE):
         self.path = Path(path)
         self.days = {}
+        self.meta = {}
         self._load()
 
     def _load(self) -> None:
@@ -272,15 +284,24 @@ class StatsStore:
         try:
             payload = json.loads(self.path.read_text())
             self.days = payload.get("days", {})
+            self.meta = payload.get("meta", {})
         except (json.JSONDecodeError, OSError):
             print("Stats file was unreadable; starting a fresh one.")
             self.days = {}
 
     def save(self) -> None:
         try:
-            self.path.write_text(json.dumps({"days": self.days}, indent=2))
+            payload = {"days": self.days, "meta": self.meta}
+            self.path.write_text(json.dumps(payload, indent=2))
         except OSError as error:
             print(f"Could not save stats: {error}")
+
+    @property
+    def setup_acknowledged(self) -> bool:
+        return bool(self.meta.get("setup_shown"))
+
+    def mark_setup_shown(self) -> None:
+        self.meta["setup_shown"] = True
 
     def _today(self) -> dict:
         return self.days.setdefault(
@@ -322,6 +343,81 @@ class StatsStore:
             f"  Current streak: {streak} day{'s' if streak != 1 else ''}",
         ]
         return "\n".join(lines)
+
+
+def run_doctor() -> int:
+    """Verify every permission and dependency the app relies on."""
+    import numpy as np
+
+    print("Step-Away doctor")
+    print(f"  Python  : {sys.version.split()[0]}")
+    print(f"  OpenCV  : {cv2.__version__}")
+    print(f"  MediaPipe: {mp.__version__}")
+
+    failures = 0
+
+    print("- Camera         : ", end="", flush=True)
+    try:
+        capture = open_camera(CAMERA_INDEX)
+        grabbed, _ = capture.read()
+        capture.release()
+        if grabbed:
+            print("OK (frames are arriving)")
+        else:
+            print(
+                "FAILED - grant Camera permission to your terminal app in "
+                "System Settings > Privacy & Security > Camera"
+            )
+            failures += 1
+    except RuntimeError as error:
+        print(f"FAILED - {error}")
+        failures += 1
+
+    print("- Face detection : ", end="", flush=True)
+    try:
+        with mp.solutions.face_detection.FaceDetection(
+            model_selection=0, min_detection_confidence=MIN_DETECTION_CONFIDENCE
+        ) as detector:
+            blank = np.zeros((240, 320, 3), dtype=np.uint8)
+            detector.process(cv2.cvtColor(blank, cv2.COLOR_BGR2RGB))
+        print("OK (model loads and runs)")
+    except Exception as error:
+        print(f"FAILED - {error}")
+        failures += 1
+
+    print("- Accessibility  : ", end="", flush=True)
+    probe = subprocess.run(
+        [
+            "osascript",
+            "-e",
+            'tell application "System Events" to get name of first application process',
+        ],
+        capture_output=True,
+        text=True,
+        timeout=LOCK_COMMAND_TIMEOUT_SECONDS,
+    )
+    error_text = probe.stderr.lower()
+    if probe.returncode == 0:
+        print("OK (System Events reachable)")
+    elif "assistive" in error_text or "not allowed" in error_text or "1002" in error_text:
+        print(
+            "MISSING - enable your terminal app in "
+            "System Settings > Privacy & Security > Accessibility"
+        )
+        failures += 1
+    else:
+        print(f"UNKNOWN ({probe.stderr.strip()}) - will diagnose again at lock time")
+
+    print("- Notifications  : ", end="", flush=True)
+    send_stretch_notification(message="Doctor test - if you can read this, nudges work!")
+    print("sent a test alert (check your notification centre)")
+
+    print()
+    if failures:
+        print(f"{failures} check(s) need attention.")
+        return 1
+    print("All checks passed. Step-Away is ready to guard your desk.")
+    return 0
 
 
 class StepAwayApp:
@@ -442,6 +538,9 @@ class StepAwayApp:
     def run(self) -> int:
         print("Step-Away is starting up. Press Ctrl+C to quit.")
         print(f"Streak so far: {self.stats.current_streak()} day(s).")
+        if not self.stats.setup_acknowledged:
+            print(FIRST_RUN_CHECKLIST)
+            self.stats.mark_setup_shown()
         self.stats.save()
 
         if self.show_preview:
@@ -554,5 +653,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--preview", action="store_true", help="show a live camera window with face boxes"
     )
+    parser.add_argument(
+        "--doctor", action="store_true", help="verify permissions and dependencies"
+    )
     args = parser.parse_args()
+    if args.doctor:
+        sys.exit(run_doctor())
     sys.exit(StepAwayApp(debug=args.debug, show_preview=args.preview).run())
