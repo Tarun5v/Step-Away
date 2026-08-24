@@ -364,8 +364,9 @@ def show_break_overlay(title: str, subtitle: str, duration_seconds: float) -> No
 
     content = window.contentView()
     content.addSubview_(blur)
-    content.addSubview_(centered_label(0.58, 70, title, 48, 1.0))
-    content.addSubview_(centered_label(0.50, 40, subtitle, 24, 0.85))
+    content.addSubview_(centered_label(0.55, 90, title, 40, 1.0))
+    if subtitle:
+        content.addSubview_(centered_label(0.47, 40, subtitle, 24, 0.85))
     content.addSubview_(centered_label(0.10, 30, "Press any key or click to continue", 15, 0.55))
 
     coordinator = Coordinator.alloc().init()
@@ -647,8 +648,8 @@ class StepAwayApp:
                 stamp = time.strftime("%H:%M:%S")
                 print(f"[{stamp}] 20-20-20 - showing eye-rest screen.")
                 show_break_overlay(
-                    "20-20-20",
-                    "Look at something 6 metres away for 20 seconds.",
+                    "Look 6 metres away for 20 seconds.",
+                    "",
                     self.eye_overlay_duration,
                 )
                 self.eye_rest_start = time.time()
@@ -816,6 +817,7 @@ class StepAwayApp:
                     key = cv2.waitKey(1) & 0xFF
                     if key == ord("w"):
                         glasses = self.stats.record_water()
+                        self.stats.save()
                         stamp = time.strftime("%H:%M:%S")
                         print(f"[{stamp}] Logged a glass of water ({glasses} today).")
                     elif key in (ord("q"), 0x1B):
