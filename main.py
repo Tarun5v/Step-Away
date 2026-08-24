@@ -517,6 +517,11 @@ class StepAwayApp:
                         raw_present, boxes = self.monitor._detect_face(detector, frame)
                         self.monitor.vote.record(raw_present)
                         last_detection = now
+                        if self.monitor.debug:
+                            hits, total = self.monitor.vote.tally
+                            stamp = time.strftime("%H:%M:%S")
+                            verdict = "HIT " if raw_present else "MISS"
+                            print(f"[{stamp}] check {verdict} window {hits}/{total}")
 
                     self._tick_common(now, delta)
                     self._draw_preview_frame(frame, boxes, fps)
