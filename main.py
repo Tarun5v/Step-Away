@@ -115,7 +115,7 @@ TERMINAL_APPS = {
 FOCUS_REMINDER_MINUTES = 50
 EYE_RULE_MINUTES = 20
 DAILY_WATER_GOAL = 8
-DRINK_GESTURE_SECONDS = 2
+DRINK_GESTURE_SECONDS = 1.5
 DRINK_DEDUP_SECONDS = 4 * 60
 HAND_SCORE_MIN = 0.5
 BREAK_THRESHOLD_SECONDS = 300
@@ -482,14 +482,15 @@ def _get_hands():
 
 
 def _drink_metrics(hands_result, face_result) -> dict:
-    """Judge whether a detected hand is really a drink at the mouth.
+    """Judge whether a detected hand is a drink at the mouth.
 
-    MediaPipe Hands happily fires on faces, shoulders and clothing when
-    the hands are empty, so "a hand exists" alone counts phantoms. Every
-    check here is physical: the detection must be confident, sit at or
-    below nose level, reach past the chin the way a cup-holding hand
-    does, keep its fingertips above the wrist, and stay within reach of
-    the mouth measured against face size.
+    Following HydroVisor's approach, the hand's posture is irrelevant -
+    fingers curl around cups and wrists rotate, so judging geometry makes
+    natural drinking unrecognisable. Only space matters: a confident
+    detection whose centre sits in the mouth zone (below the nose, within
+    about one face-width of the mouth, down to just under chin level)
+    counts. That keeps face-phantoms above the nose and desk hands below
+    the zone out, while any natural grip inside it passes.
     """
     hand_lists = getattr(hands_result, "multi_hand_landmarks", None)
     if not hand_lists:
@@ -514,22 +515,15 @@ def _drink_metrics(hands_result, face_result) -> dict:
     height = max(abs(chin_y - face[10].y), 1e-4)
 
     points = hand_lists[0].landmark
-    xs = [point.x for point in points]
-    ys = [point.y for point in points]
-    centre_x = sum(xs) / len(xs)
-    centre_y = sum(ys) / len(ys)
-    bottom = max(ys)
-    tips_y = sum(points[index].y for index in (4, 8, 12, 16, 20)) / 5
-    wrist_y = points[0].y
+    centre_x = sum(point.x for point in points) / len(points)
+    centre_y = sum(point.y for point in points) / len(points)
 
     checks = {
         "score": score >= HAND_SCORE_MIN,
         "level": centre_y > nose_y - 0.05 * height,
-        "past_chin": bottom > chin_y - 0.1 * height,
-        "orient": tips_y < wrist_y,
         "near_mouth": (
-            abs(centre_x - mouth_x) < 0.9 * span
-            and mouth_y < centre_y < chin_y + 0.6 * height
+            abs(centre_x - mouth_x) < 1.1 * span
+            and mouth_y - 0.05 * height < centre_y < chin_y + 0.9 * height
         ),
     }
     return {

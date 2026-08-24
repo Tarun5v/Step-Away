@@ -23,7 +23,7 @@ stretch when you have been focused for too long.
   tracking confirms you actually looked away for 20 seconds. Keep staring
   and it will call you out.
 - **Automatic hydration tracking** - hand tracking watches for a hand
-  raised toward your face and logs a glass by itself (max one per
+  a cup near your mouth and logs a glass by itself (max one per
   4 minutes); press `w` in the preview window to log manually.
 - **Water streaks** - hit your daily goal of 8 glasses to extend the
   streak; miss a day and it resets to zero. Progress and streak live in
