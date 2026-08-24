@@ -6,8 +6,8 @@ stretch when you have been focused for too long.
 
 ## Features
 
-- **Auto-lock security** - no face detected for 10 seconds triggers a 5-second
-  warning, then locks the screen with `Cmd+Ctrl+Q`.
+- **Auto-lock security** - after 5 seconds away you get a warning; if you are
+  still gone at the 10-second mark, the screen locks with `Cmd+Ctrl+Q`.
 - **Wellness nudges** - a desktop notification after 50 minutes of
   uninterrupted focus so you remember to stand up and stretch.
 - **Break tracking** - stays away long enough (5+ minutes) and it counts as a
@@ -53,12 +53,14 @@ Press `Ctrl+C` to quit; a summary report is printed on exit.
 
 Tune the behaviour by editing the constants at the top of `main.py`:
 
-| Constant                 | Default | Meaning                                     |
-| ------------------------ | ------- | ------------------------------------------- |
-| `CHECK_INTERVAL_SECONDS` | `3`     | How often the webcam frame is analysed       |
-| `ABSENCE_LOCK_SECONDS`   | `10`    | Seconds away before the screen locks         |
-| `FOCUS_REMINDER_MINUTES` | `50`    | Uninterrupted focus minutes per stretch nudge|
-| `BREAK_THRESHOLD_SECONDS`| `300`   | Away-time that counts as a real break        |
+| Constant                 | Default | Meaning                                       |
+| ------------------------ | ------- | --------------------------------------------- |
+| `CHECK_INTERVAL_SECONDS` | `3`     | How often the webcam frame is analysed        |
+| `ABSENCE_LOCK_SECONDS`   | `10`    | Seconds away before the screen locks          |
+| `ABSENCE_WARNING_SECONDS`| `5`     | Seconds away before the lock warning shows    |
+| `LOCK_RETRY_SECONDS`     | `30`    | Delay between lock retries when locking fails |
+| `FOCUS_REMINDER_MINUTES` | `50`    | Uninterrupted focus minutes per stretch nudge |
+| `BREAK_THRESHOLD_SECONDS`| `300`   | Away-time that counts as a real break         |
 
 ## Privacy
 
