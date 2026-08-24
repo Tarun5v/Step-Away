@@ -94,12 +94,22 @@ LOCK_RETRY_SECONDS = 30
 FOCUS_REMINDER_MINUTES = 50
 EYE_RULE_MINUTES = 20
 BREAK_THRESHOLD_SECONDS = 300
-BREAK_OVERLAY_SECONDS = 30
+BREAK_AWAY_SECONDS = 60
+DEMO_BREAK_AWAY_SECONDS = 5
 EYE_REST_AWAY_SECONDS = 20
 DEMO_EYE_REST_AWAY_SECONDS = 4
 OVERLAY_COOLDOWN_SECONDS = 60
 EYE_REST_POLL_SECONDS = 1.0
 EYE_REST_NAG_STEP_SECONDS = 4.0
+STRETCH_NAG_STEP_SECONDS = 6.0
+STRETCH_NAG_MESSAGES = [
+    "Stand up.",
+    "Reach for the ceiling. Big stretch.",
+    "Walk to the far side of the room.",
+    "Roll those shoulders.",
+    "Touch your toes if you can.",
+    "One more lap - maybe refill your water?",
+]
 EYE_REST_NAG_MESSAGES = [
     "I can still see you watching\u2026",
     "The screen is fine without you. Look away.",
@@ -347,6 +357,66 @@ def gaze_on_screen(frame) -> bool:
     left_eye = eye_ratio(159, 145, 33, 133)
     right_eye = eye_ratio(386, 374, 362, 263)
     return (left_eye + right_eye) / 2 > 0.15
+
+
+def face_in_frame(frame) -> bool:
+    """True when any face is visible - i.e. the user is still at the desk.
+
+    Used during the break screen: a face means the user has not stood up.
+    """
+    import cv2 as _cv2
+
+    detector_mesh = _get_face_mesh()
+    image = _cv2.cvtColor(frame, _cv2.COLOR_BGR2RGB)
+    with QuietStderr():
+        result = detector_mesh.process(image)
+    return bool(result.multi_face_landmarks)
+
+
+class StretchNagger:
+    """Holds the break screen open until the user is actually up and about.
+
+    While a face is visible the user is considered still seated and the
+    instructions escalate. The screen releases only after the face stays
+    out of frame for the required away time.
+    """
+
+    def __init__(
+        self,
+        frame_provider,
+        step_seconds: float = STRETCH_NAG_STEP_SECONDS,
+        required_away_seconds: float = BREAK_AWAY_SECONDS,
+    ):
+        self.frame_provider = frame_provider
+        self.step_seconds = step_seconds
+        self.required_away_seconds = required_away_seconds
+        self.seated_seconds = 0.0
+        self.away_seconds = 0.0
+        self.level = 0
+
+    def next_message(self):
+        try:
+            frame = self.frame_provider()
+        except Exception:
+            frame = None
+
+        seated = frame is not None and face_in_frame(frame)
+
+        if seated:
+            self.seated_seconds += EYE_REST_POLL_SECONDS
+            self.away_seconds = 0.0
+            reached = int(self.seated_seconds // self.step_seconds)
+            if reached > self.level:
+                self.level = reached
+                index = min(self.level - 1, len(STRETCH_NAG_MESSAGES) - 1)
+                return STRETCH_NAG_MESSAGES[index]
+            return None
+
+        self.away_seconds += EYE_REST_POLL_SECONDS
+        self.seated_seconds = max(0.0, self.seated_seconds - EYE_REST_POLL_SECONDS)
+        if self.away_seconds >= self.required_away_seconds:
+            return OVERLAY_CLOSE
+        return None
 
 
 class GazeNagger:
@@ -755,13 +825,13 @@ class StepAwayApp:
         if demo:
             self.stretch_interval = DEMO_STRETCH_SECONDS
             self.eye_rest_interval = DEMO_EYE_REST_SECONDS
-            self.break_overlay_duration = 8
+            self.break_required_away = 5
             self.eye_rest_required_away = 3
             self.overlay_cooldown = DEMO_OVERLAY_COOLDOWN_SECONDS
         else:
             self.stretch_interval = FOCUS_REMINDER_MINUTES * 60
             self.eye_rest_interval = EYE_RULE_MINUTES * 60
-            self.break_overlay_duration = BREAK_OVERLAY_SECONDS
+            self.break_required_away = BREAK_AWAY_SECONDS
             self.eye_rest_required_away = EYE_REST_AWAY_SECONDS
             self.overlay_cooldown = OVERLAY_COOLDOWN_SECONDS
         self.last_overlay_closed_at = 0.0
@@ -808,10 +878,15 @@ class StepAwayApp:
                 self.stats.record_reminder()
                 stamp = time.strftime("%H:%M:%S")
                 print(f"[{stamp}] Focus limit reached - showing break screen.")
+                nagger = StretchNagger(
+                    self._eye_rest_frame_provider(),
+                    required_away_seconds=self.break_required_away,
+                )
                 show_break_overlay(
                     "Time for a break",
-                    "You've reached your focus limit. Stand up, stretch, breathe.",
-                    self.break_overlay_duration,
+                    "Stand up and move around - the screen waits for you.",
+                    None,
+                    on_title_refresh=nagger.next_message,
                 )
                 self.last_overlay_closed_at = time.time()
                 self.focus_start = self.last_overlay_closed_at
@@ -920,9 +995,9 @@ class StepAwayApp:
         print("Step-Away is starting up. Press Ctrl+C to quit.")
         if self.stretch_interval == DEMO_STRETCH_SECONDS:
             print(
-                f"Demo mode: break screen every {DEMO_STRETCH_SECONDS}s, "
-                f"eye rest every {DEMO_EYE_REST_SECONDS}s "
-                f"(stays up until you look away for {3}s)."
+                f"Demo mode: break screen every {DEMO_STRETCH_SECONDS}s "
+                f"(stays up until you stay away for 5s), eye rest every "
+                f"{DEMO_EYE_REST_SECONDS}s (until you look away for 3s)."
             )
         print(f"Streak so far: {self.stats.current_streak()} day(s).")
         if not self.stats.setup_acknowledged:
