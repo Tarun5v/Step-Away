@@ -117,6 +117,7 @@ EYE_RULE_MINUTES = 20
 DAILY_WATER_GOAL = 8
 DRINK_GESTURE_SECONDS = 1.5
 DRINK_DEDUP_SECONDS = 4 * 60
+CUP_DOWN_SECONDS = 12
 HAND_SCORE_MIN = 0.5
 POSE_MIN_VISIBILITY = 0.3
 WRIST_MOUTH_RATIO = 0.8
@@ -1217,6 +1218,10 @@ class StepAwayApp:
         self.drink_detector = DrinkDetector()
         self.last_pose_call = 0.0
         self.last_auto_water_ts = 0.0
+        self.sip_quiet_start = None
+        self.last_quiet_seconds = None
+        self.burst_open = False
+        self.burst_counted = True
         self.started_at = time.time()
         self.grace_note_shown = False
 
@@ -1297,7 +1302,7 @@ class StepAwayApp:
             print(f"Drink detector unavailable: {error.__class__.__name__}: {error}")
 
     def _consider_drink(self, now: float) -> None:
-        """Run pose detection at most once a second; log deduped drinks."""
+        """Run detection at most once a second; count glasses, not gulps."""
         gap = now - self.last_pose_call
         if gap < EYE_REST_POLL_SECONDS:
             return
@@ -1309,23 +1314,54 @@ class StepAwayApp:
         if frame is None:
             return
         drinking_now = self.drink_detector.consider(frame, gap)
+
+        if drinking_now:
+            if not self.burst_open:
+                # A new burst of sips starts. What matters is how long the
+                # cup was down before it: short gaps mean gulps of the same
+                # glass, a real pause means a new glass.
+                self.burst_open = True
+                self.burst_counted = False
+                if self.sip_quiet_start is not None:
+                    self.last_quiet_seconds = now - self.sip_quiet_start
+                    self.sip_quiet_start = None
+                else:
+                    self.last_quiet_seconds = None
+        else:
+            self.burst_open = False
+            if self.sip_quiet_start is None:
+                self.sip_quiet_start = now
+
         self.pose_reads = getattr(self, "pose_reads", 0) + 1
         obs = dict(self.drink_detector.last_obs)
         obs["held"] = round(self.drink_detector.sustained, 1)
+
+        suffix = ""
+        if drinking_now and not self.burst_counted:
+            first_of_session = (
+                self.last_quiet_seconds is None
+                and now - self.last_auto_water_ts >= DRINK_DEDUP_SECONDS
+            )
+            separated = (
+                self.last_quiet_seconds is not None
+                and self.last_quiet_seconds >= CUP_DOWN_SECONDS
+            )
+            stale = now - self.last_auto_water_ts >= DRINK_DEDUP_SECONDS
+            if first_of_session or separated or stale:
+                self.burst_counted = True
+                self.last_auto_water_ts = now
+                self._announce_water(self.stats.record_water(), auto=True)
+                suffix = " - LOGGED"
+            else:
+                suffix = " - same glass"
+        elif drinking_now:
+            suffix = " - same glass"
+
         if drinking_now or self.drink_detector.sustained > 0.5 or (
             self.pose_reads % 5 == 0 and self.monitor.face_present
         ):
             stamp = time.strftime("%H:%M:%S")
-            print(
-                f"[{stamp}] drink: {obs}"
-                f"{' - LOGGED' if drinking_now else ''}"
-            )
-        if not drinking_now:
-            return
-        if now - self.last_auto_water_ts < DRINK_DEDUP_SECONDS:
-            return
-        self.last_auto_water_ts = now
-        self._announce_water(self.stats.record_water(), auto=True)
+            print(f"[{stamp}] drink: {obs}{suffix}")
 
     def _announce_water(self, count: int, auto: bool = False) -> None:
         stamp = time.strftime("%H:%M:%S")

@@ -89,7 +89,8 @@ Tune the behaviour by editing the constants at the top of `main.py`:
 | `EYE_RULE_MINUTES`       | `20`    | Minutes between 20-20-20 eye-rest screens     |
 | `DAILY_WATER_GOAL`       | `8`     | Glasses per day needed to extend the water streak |
 | `DRINK_GESTURE_SECONDS`  | `2`     | How long a verified hand-at-mouth must hold to count |
-| `DRINK_DEDUP_SECONDS`    | `240`   | Minimum gap between auto-logged glasses |
+| `CUP_DOWN_SECONDS`       | `12`    | Cup-down pause that turns the next sips into a new glass |
+| `DRINK_DEDUP_SECONDS`    | `240`   | Fallback minimum gap between auto-logged glasses |
 | `BREAK_AWAY_SECONDS`     | `60`    | Away-from-desk seconds before the break screen releases |
 | `INPUT_ACTIVITY_GRACE_SECONDS` | `5` | Mouse/keyboard idle gap still counted as presence |
 | `STARTUP_GRACE_SECONDS`  | `60`    | Delay after launch before auto-lock arms      |
