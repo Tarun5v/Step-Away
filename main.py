@@ -5,6 +5,7 @@ and nudges you to stretch after long focus sessions.
 """
 
 import argparse
+import ctypes
 import json
 import os
 import subprocess
@@ -90,6 +91,17 @@ class PresenceVote:
 ABSENCE_LOCK_SECONDS = 10
 ABSENCE_WARNING_SECONDS = 5
 LOCK_COMMAND_TIMEOUT_SECONDS = 5
+LOCK_RETRY_SECONDS = 30
+TERMINAL_APPS = {
+    "Terminal",
+    "iTerm2",
+    "Warp",
+    "Hyper",
+    "Alacritty",
+    "kitty",
+    "Ghostty",
+    "WezTerm",
+}
 LOCK_RETRY_SECONDS = 30
 FOCUS_REMINDER_MINUTES = 50
 EYE_RULE_MINUTES = 20
@@ -267,35 +279,77 @@ class PresenceMonitor(threading.Thread):
         cv2.imwrite(str(out_dir / f"check_{stamp}_{tag}_{self._snapshot_index}.jpg"), frame)
 
 
-def lock_screen() -> bool:
-    """Lock the Mac with the Cmd+Ctrl+Q shortcut via AppleScript."""
-    script = (
-        'tell application "System Events" to '
-        'keystroke "q" using {command down, control down}'
-    )
+def _frontmost_app_name():
+    """Name of the app currently receiving keystrokes, or None."""
     try:
-        result = subprocess.run(
-            ["osascript", "-e", script],
+        from AppKit import NSWorkspace
+
+        app = NSWorkspace.sharedWorkspace().frontmostApplication()
+        return app.localizedName()
+    except Exception:
+        return None
+
+
+def _lock_with_security_framework() -> bool:
+    """Lock the session via Security.framework - no permissions, no focus.
+
+    SACLockScreenImmediate locks the screen directly regardless of which
+    app is frontmost, unlike synthetic keystrokes that can be swallowed
+    by the focused window (e.g. the camera preview).
+    """
+    try:
+        security = ctypes.CDLL(
+            "/System/Library/Frameworks/Security.framework/Security"
+        )
+        security.SACLockScreenImmediate()
+        return True
+    except Exception:
+        return False
+
+
+def _lock_by_display_sleep() -> bool:
+    """Last-resort lock: sleep the display (password gate still applies)."""
+    try:
+        subprocess.run(
+            ["pmset", "displaysleepnow"],
             capture_output=True,
-            text=True,
             timeout=LOCK_COMMAND_TIMEOUT_SECONDS,
         )
-    except FileNotFoundError:
-        print("Automatic locking needs macOS (osascript was not found).")
-        return False
-    except subprocess.TimeoutExpired:
-        print("The screen lock command timed out.")
-        return False
-    if result.returncode != 0:
-        detail = (result.stderr or "").strip().splitlines()
-        reason = f" ({detail[0]})" if detail else ""
         print(
-            "Could not lock the screen automatically"
-            f"{reason}. Grant Accessibility permission to your terminal app in "
-            "System Settings > Privacy & Security > Accessibility."
+            "Locked by display sleep instead - set 'Require password "
+            "immediately' in System Settings > Lock Screen for full effect."
         )
+        return True
+    except Exception:
         return False
-    return True
+
+
+def lock_screen() -> bool:
+    """Lock the Mac using the strongest mechanism available right now."""
+    if _lock_with_security_framework():
+        return True
+
+    # A synthetic Cmd+Ctrl+Q only reaches the system shortcut when a real
+    # terminal is frontmost; any other focused app swallows it silently.
+    if _frontmost_app_name() in TERMINAL_APPS:
+        script = (
+            'tell application "System Events" to '
+            'keystroke "q" using {command down, control down}'
+        )
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True,
+                timeout=LOCK_COMMAND_TIMEOUT_SECONDS,
+            )
+            if result.returncode == 0:
+                return True
+        except (FileNotFoundError, subprocess.TimeoutExpired) as error:
+            print(f"Keystroke lock unavailable ({error.__class__.__name__}).")
+
+    print("Falling back to display-sleep lock.")
+    return _lock_by_display_sleep()
 
 
 _face_mesh_lock = threading.Lock()
