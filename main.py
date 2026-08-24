@@ -115,17 +115,6 @@ TERMINAL_APPS = {
 FOCUS_REMINDER_MINUTES = 50
 EYE_RULE_MINUTES = 20
 DAILY_WATER_GOAL = 8
-DRINK_GESTURE_SECONDS = 1.5
-DRINK_DEDUP_SECONDS = 4 * 60
-CUP_DOWN_SECONDS = 12
-HAND_SCORE_MIN = 0.5
-POSE_MIN_VISIBILITY = 0.3
-WRIST_MOUTH_RATIO = 0.8
-MIN_DRINK_RADIUS = 0.22
-POSE_SHOULDER_GATE = 0.12
-FACE_LOSS_GRACE_SECONDS = 3
-DRINK_SIGNAL_GRACE_SECONDS = 1.5
-DRINK_DECAY_RATE = 0.4
 BREAK_THRESHOLD_SECONDS = 300
 BREAK_AWAY_SECONDS = 60
 DEMO_BREAK_AWAY_SECONDS = 5
@@ -466,217 +455,6 @@ def face_in_frame(frame) -> bool:
     with QuietStderr():
         result = detector_mesh.process(image)
     return bool(result.multi_face_landmarks)
-
-
-_hands_lock = threading.Lock()
-_hands = None
-_pose_lock = threading.Lock()
-_pose = None
-
-
-def _get_hands():
-    """Lazily create the shared hand tracker used for drink detection."""
-    global _hands
-    with _hands_lock:
-        if _hands is None:
-            import mediapipe as mp
-
-            with QuietStderr():
-                _hands = mp.solutions.hands.Hands(
-                    static_image_mode=False,
-                    max_num_hands=1,
-                    model_complexity=0,
-                    min_detection_confidence=0.6,
-                )
-    return _hands
-
-
-def _get_pose():
-    """Lazily create the shared lightweight pose model for drink detection."""
-    global _pose
-    with _pose_lock:
-        if _pose is None:
-            import mediapipe as mp
-
-            with QuietStderr():
-                _pose = mp.solutions.pose.Pose(
-                    static_image_mode=False,
-                    model_complexity=0,
-                    min_detection_confidence=0.5,
-                )
-    return _pose
-
-
-def _lip_zone(face):
-    """Return a generous rectangle around the lips, scaled by face size.
-
-    Ported from HydroVisor's overlapDetection.ts: the lip landmarks form
-    a tiny box that drinking vessels must touch. The padding lets cups,
-    bottles and mugs of any size count while staying anchored to the
-    mouth rather than the whole face.
-    """
-    points = [face[index] for index in (13, 14, 15, 16, 0, 17)]
-    span = abs(face[454].x - face[234].x)
-    height = abs(face[152].y - face[10].y)
-    lip_x = sum(point.x for point in points) / len(points)
-    lip_y = sum(point.y for point in points) / len(points)
-    return {
-        "x": lip_x,
-        "top": lip_y - 0.45 * height,
-        "bottom": lip_y + 0.45 * height,
-        "left": lip_x - 0.8 * span,
-        "right": lip_x + 0.8 * span,
-        "centre": (lip_x, lip_y),
-    }
-
-
-def _drink_metrics(hands_result, pose_result, zone, frozen=False) -> dict:
-    """Judge drinking HydroVisor-style: does something cup-sized touch the lips?
-
-    A hand wrapped around a mug stops looking like a hand, so no single
-    tracker is trusted alone. Two independent signals vote, either one is
-    enough, and both are anchored to the same lip rectangle:
-
-    - hands: any confident detection whose bounding box overlaps the lip
-      zone, regardless of finger posture (the vessel may hide the palm).
-    - pose: either wrist inside the zone's reach radius, gated by
-      visibility and an above-shoulder check to reject desk hands.
-
-    Phantom detections far from the lips satisfy neither. The zone may
-    be carried over from the previous read while the face is briefly
-    hidden behind the cup mid-sip; frozen marks those reads.
-    """
-    obs = {}
-
-    hand_lists = getattr(hands_result, "multi_hand_landmarks", None)
-    score = 0.0
-    handedness = getattr(hands_result, "multi_handedness", None)
-    if handedness:
-        score = handedness[0].classification[0].score
-    obs["hand"] = bool(hand_lists)
-    obs["score"] = round(score, 2)
-    hand_hit = False
-    if hand_lists:
-        points = hand_lists[0].landmark
-        left = min(point.x for point in points)
-        right = max(point.x for point in points)
-        top = min(point.y for point in points)
-        bottom = max(point.y for point in points)
-        overlaps = (
-            score >= HAND_SCORE_MIN
-            and left < zone["right"]
-            and right > zone["left"]
-            and top < zone["bottom"]
-            and bottom > zone["top"]
-        )
-        obs["in_zone"] = overlaps
-        hand_hit = overlaps
-
-    pose_landmarks = getattr(pose_result, "pose_landmarks", None)
-    pose_hit = False
-    best_wrist = None
-    if pose_landmarks:
-        body = pose_landmarks.landmark
-        shoulder_span = max(abs(body[12].x - body[11].x), 1e-4)
-        shoulder_line = max(body[11].y, body[12].y)
-        radius = max(WRIST_MOUTH_RATIO * shoulder_span, MIN_DRINK_RADIUS)
-        cx, cy = zone["centre"]
-        for index in (15, 16):
-            wrist = body[index]
-            visibility = getattr(wrist, "visibility", 1.0)
-            distance = ((wrist.x - cx) ** 2 + (wrist.y - cy) ** 2) ** 0.5
-            if best_wrist is None or distance < best_wrist[0]:
-                best_wrist = (distance, visibility, wrist.y < shoulder_line)
-            if (
-                visibility >= POSE_MIN_VISIBILITY
-                and distance < radius
-                and wrist.y < shoulder_line + POSE_SHOULDER_GATE
-            ):
-                pose_hit = True
-    if best_wrist:
-        obs["wrist_d"] = round(best_wrist[0], 3)
-        obs["wrist_vis"] = round(best_wrist[1], 2)
-    obs["pose"] = pose_hit
-
-    if frozen:
-        obs["frozen"] = True
-    obs["drinking"] = hand_hit or pose_hit
-    return obs
-
-
-class DrinkDetector:
-    """Detects drinking as sustained contact between vessel and lips.
-
-    Two trackers vote on whether anything cup-like is at the mouth; the
-    verdict must hold for DRINK_GESTURE_SECONDS before consider() fires
-    once and re-arms. Real sips flicker - the cup hides the face, the
-    wrist crosses the radius boundary - so the lip zone is cached for a
-    few seconds when the face vanishes, progress only decays after a
-    grace period of no signal, and decay itself is slow.
-    """
-
-    def __init__(self):
-        self.sustained = 0.0
-        self.last_obs = {}
-        self._zone = None
-        self._zone_ts = 0.0
-        self._positive_ts = None
-
-    def consider(self, frame, seconds: float, now=None) -> bool:
-        import time as _time
-        import cv2 as _cv2
-
-        if now is None:
-            now = _time.time()
-        try:
-            image = _cv2.cvtColor(frame, _cv2.COLOR_BGR2RGB)
-            with QuietStderr():
-                face_result = _get_face_mesh().process(image)
-                hands_result = _get_hands().process(image)
-                pose_result = _get_pose().process(image)
-        except Exception as error:
-            self.sustained = 0.0
-            self.last_obs = {"error": f"{type(error).__name__}: {error}"[:140]}
-            return False
-
-        face_lists = getattr(face_result, "multi_face_landmarks", None)
-        frozen = False
-        if face_lists:
-            zone = _lip_zone(face_lists[0].landmark)
-            self._zone = zone
-            self._zone_ts = now
-        elif self._zone is not None and now - self._zone_ts <= FACE_LOSS_GRACE_SECONDS:
-            # Mid-sip the cup often covers the face; keep judging against
-            # the last known lip position instead of dropping the frame.
-            zone = self._zone
-            frozen = True
-        else:
-            self.last_obs = {"why": "no_face", "drinking": False}
-            return self._update(False, seconds, now)
-
-        self.last_obs = _drink_metrics(hands_result, pose_result, zone, frozen)
-        drinking = bool(self.last_obs.get("drinking"))
-        return self._update(drinking, seconds, now)
-
-    def _update(self, drinking: bool, seconds: float, now: float) -> bool:
-        if drinking:
-            self.sustained += min(max(seconds, 0.0), 2.0)
-            self._positive_ts = now
-        else:
-            # Micro-dips between sips should not wipe accumulated progress;
-            # decay only starts after a quiet period, and then slowly.
-            idle = (
-                now - self._positive_ts if self._positive_ts is not None else 1e9
-            )
-            if idle > DRINK_SIGNAL_GRACE_SECONDS:
-                self.sustained = max(
-                    0.0,
-                    self.sustained - DRINK_DECAY_RATE * min(max(seconds, 0.0), 2.0),
-                )
-        if self.sustained >= DRINK_GESTURE_SECONDS:
-            self.sustained = 0.0
-            return True
-        return False
 
 
 class StretchNagger:
@@ -1215,13 +993,6 @@ class StepAwayApp:
             self.overlay_cooldown = OVERLAY_COOLDOWN_SECONDS
         self.last_overlay_closed_at = 0.0
         self.input_hold_note_shown = False
-        self.drink_detector = DrinkDetector()
-        self.last_pose_call = 0.0
-        self.last_auto_water_ts = 0.0
-        self.sip_quiet_start = None
-        self.last_quiet_seconds = None
-        self.burst_open = False
-        self.burst_counted = True
         self.started_at = time.time()
         self.grace_note_shown = False
 
@@ -1283,86 +1054,6 @@ class StepAwayApp:
                 print(f"Desk empty - locking in {remaining}s. Hop back in view to cancel.")
                 self.warned = True
 
-    def _warm_drink_model(self) -> None:
-        """Load the drink models on the main thread before loops start.
-
-        MediaPipe binds its compute context to the creating thread on
-        macOS, so the models must be created and first used here rather
-        than in a helper thread, or every later call would fail.
-        """
-        try:
-            import numpy as np
-
-            blank = np.zeros((64, 64, 3), dtype=np.uint8)
-            _get_hands().process(blank)
-            _get_pose().process(blank)
-            stamp = time.strftime("%H:%M:%S")
-            print(f"[{stamp}] Drink detector ready.")
-        except Exception as error:
-            print(f"Drink detector unavailable: {error.__class__.__name__}: {error}")
-
-    def _consider_drink(self, now: float) -> None:
-        """Run detection at most once a second; count glasses, not gulps."""
-        gap = now - self.last_pose_call
-        if gap < EYE_REST_POLL_SECONDS:
-            return
-        self.last_pose_call = now
-        read_frame = self._eye_rest_frame_provider()
-        if not callable(read_frame):
-            return
-        frame = read_frame()
-        if frame is None:
-            return
-        drinking_now = self.drink_detector.consider(frame, gap)
-
-        if drinking_now:
-            if not self.burst_open:
-                # A new burst of sips starts. What matters is how long the
-                # cup was down before it: short gaps mean gulps of the same
-                # glass, a real pause means a new glass.
-                self.burst_open = True
-                self.burst_counted = False
-                if self.sip_quiet_start is not None:
-                    self.last_quiet_seconds = now - self.sip_quiet_start
-                    self.sip_quiet_start = None
-                else:
-                    self.last_quiet_seconds = None
-        else:
-            self.burst_open = False
-            if self.sip_quiet_start is None:
-                self.sip_quiet_start = now
-
-        self.pose_reads = getattr(self, "pose_reads", 0) + 1
-        obs = dict(self.drink_detector.last_obs)
-        obs["held"] = round(self.drink_detector.sustained, 1)
-
-        suffix = ""
-        if drinking_now and not self.burst_counted:
-            first_of_session = (
-                self.last_quiet_seconds is None
-                and now - self.last_auto_water_ts >= DRINK_DEDUP_SECONDS
-            )
-            separated = (
-                self.last_quiet_seconds is not None
-                and self.last_quiet_seconds >= CUP_DOWN_SECONDS
-            )
-            stale = now - self.last_auto_water_ts >= DRINK_DEDUP_SECONDS
-            if first_of_session or separated or stale:
-                self.burst_counted = True
-                self.last_auto_water_ts = now
-                self._announce_water(self.stats.record_water(), auto=True)
-                suffix = " - LOGGED"
-            else:
-                suffix = " - same glass"
-        elif drinking_now:
-            suffix = " - same glass"
-
-        if drinking_now or self.drink_detector.sustained > 0.5 or (
-            self.pose_reads % 5 == 0 and self.monitor.face_present
-        ):
-            stamp = time.strftime("%H:%M:%S")
-            print(f"[{stamp}] drink: {obs}{suffix}")
-
     def _announce_water(self, count: int, auto: bool = False) -> None:
         stamp = time.strftime("%H:%M:%S")
         verb = "Detected a drink" if auto else "Logged a glass"
@@ -1384,7 +1075,6 @@ class StepAwayApp:
     def _update_wellness(self, now: float, delta: float) -> None:
         if self.monitor.face_present:
             self.stats.add_focus(delta)
-            self._consider_drink(now)
             if now - self.last_overlay_closed_at < self.overlay_cooldown:
                 return
 
@@ -1509,7 +1199,6 @@ class StepAwayApp:
 
     def run(self) -> int:
         print("Step-Away is starting up. Press Ctrl+C to quit.")
-        self._warm_drink_model()
         if self.stretch_interval == DEMO_STRETCH_SECONDS:
             print(
                 f"Demo mode: break screen every {DEMO_STRETCH_SECONDS}s "

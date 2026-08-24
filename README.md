@@ -22,9 +22,8 @@ stretch when you have been focused for too long.
   screen appears, and it does not blink first: it stays up until gaze
   tracking confirms you actually looked away for 20 seconds. Keep staring
   and it will call you out.
-- **Automatic hydration tracking** - hand tracking watches for a hand
-  a cup near your mouth and logs a glass by itself (max one per
-  4 minutes); press `w` in the preview window to log manually.
+- **Water tracking** - press `w` in the preview window to log a glass
+  whenever you take a drink.
 - **Water streaks** - hit your daily goal of 8 glasses to extend the
   streak; miss a day and it resets to zero. Progress and streak live in
   the preview HUD and the exit report. Snapchat rules apply: keep the
@@ -88,9 +87,6 @@ Tune the behaviour by editing the constants at the top of `main.py`:
 | `FOCUS_REMINDER_MINUTES` | `50`    | Uninterrupted focus minutes per stretch nudge |
 | `EYE_RULE_MINUTES`       | `20`    | Minutes between 20-20-20 eye-rest screens     |
 | `DAILY_WATER_GOAL`       | `8`     | Glasses per day needed to extend the water streak |
-| `DRINK_GESTURE_SECONDS`  | `2`     | How long a verified hand-at-mouth must hold to count |
-| `CUP_DOWN_SECONDS`       | `12`    | Cup-down pause that turns the next sips into a new glass |
-| `DRINK_DEDUP_SECONDS`    | `240`   | Fallback minimum gap between auto-logged glasses |
 | `BREAK_AWAY_SECONDS`     | `60`    | Away-from-desk seconds before the break screen releases |
 | `INPUT_ACTIVITY_GRACE_SECONDS` | `5` | Mouse/keyboard idle gap still counted as presence |
 | `STARTUP_GRACE_SECONDS`  | `60`    | Delay after launch before auto-lock arms      |
