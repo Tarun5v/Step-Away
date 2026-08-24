@@ -24,10 +24,34 @@ PRESENCE_WINDOW_SIZE = 5
 PRESENCE_MIN_HITS = 2
 MIN_DETECTION_CONFIDENCE = 0.4
 DRAIN_GRABS = 6
+PREVIEW_TARGET_FPS = 60
+FPS_SMOOTHING = 0.9
 DEBUG_FRAME_DIR = ".debug_frames"
 DEBUG_SNAPSHOT_LIMIT = 40
 MOTION_RESIZE_WIDTH = 160
 PREVIEW_WINDOW_TITLE = "Step-Away camera"
+
+
+class PresenceVote:
+    """Rolling-window vote over raw face readings to smooth flicker."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._hits = deque(maxlen=PRESENCE_WINDOW_SIZE)
+
+    def record(self, raw_present: bool) -> None:
+        with self._lock:
+            self._hits.append(raw_present)
+
+    @property
+    def present(self) -> bool:
+        with self._lock:
+            return sum(self._hits) >= PRESENCE_MIN_HITS
+
+    @property
+    def tally(self):
+        with self._lock:
+            return sum(self._hits), len(self._hits)
 ABSENCE_LOCK_SECONDS = 10
 ABSENCE_WARNING_SECONDS = 5
 LOCK_COMMAND_TIMEOUT_SECONDS = 5
@@ -38,6 +62,17 @@ STATS_FILE = "step_away_stats.json"
 SAVE_INTERVAL_SECONDS = 60
 
 
+def open_camera(camera_index: int):
+    capture = cv2.VideoCapture(camera_index)
+    if not capture.isOpened():
+        capture.release()
+        raise RuntimeError(
+            f"Could not open camera {camera_index}. "
+            "Make sure it exists and is not in use by another app."
+        )
+    return capture
+
+
 class PresenceMonitor(threading.Thread):
     """Background thread that keeps track of whether anyone sits at the desk."""
 
@@ -45,36 +80,21 @@ class PresenceMonitor(threading.Thread):
         super().__init__(daemon=True)
         self.camera_index = camera_index
         self.debug = debug
-        self._state_lock = threading.Lock()
-        self._recent_hits = deque(maxlen=PRESENCE_WINDOW_SIZE)
+        self.vote = PresenceVote()
         self._running = True
         self.error = None
         self._prev_motion_frame = None
         self._snapshot_index = 0
-        self._latest_view = None
 
     @property
     def face_present(self) -> bool:
-        with self._state_lock:
-            return sum(self._recent_hits) >= PRESENCE_MIN_HITS
-
-    @property
-    def latest_view(self):
-        with self._state_lock:
-            return self._latest_view
+        return self.vote.present
 
     def stop(self) -> None:
         self._running = False
 
     def _open_camera(self):
-        capture = cv2.VideoCapture(self.camera_index)
-        if not capture.isOpened():
-            capture.release()
-            raise RuntimeError(
-                f"Could not open camera {self.camera_index}. "
-                "Make sure it exists and is not in use by another app."
-            )
-        return capture
+        return open_camera(self.camera_index)
 
     def _detect_face(self, detector, frame):
         """Return (present, pixel-space boxes) for faces in the frame."""
@@ -136,17 +156,15 @@ class PresenceMonitor(threading.Thread):
 
                 raw_present, boxes = self._detect_face(detector, frame)
                 motion = self._motion_score(frame)
-                with self._state_lock:
-                    self._recent_hits.append(raw_present)
-                    self._latest_view = (frame.copy(), boxes)
-                    hits = sum(self._recent_hits)
+                self.vote.record(raw_present)
+                hits, total = self.vote.tally
 
                 if self.debug:
                     stamp = time.strftime("%H:%M:%S")
                     verdict = "HIT " if raw_present else "MISS"
                     print(
                         f"[{stamp}] check {verdict} window {hits}/"
-                        f"{len(self._recent_hits)} motion {motion:.1f}"
+                        f"{total} motion {motion:.1f}"
                     )
                     self._save_debug_snapshot(frame, raw_present)
 
@@ -383,52 +401,82 @@ class StepAwayApp:
             self.focus_start = None
             self.break_counted = False
 
-    def _draw_preview(self) -> None:
-        view = self.monitor.latest_view
-        if view is None:
+    def _announce(self, present: bool) -> None:
+        if present == self.presence_announced:
             return
-        frame, boxes = view
+        stamp = time.strftime("%H:%M:%S")
+        state = "arrived" if present else "left"
+        print(f"[{stamp}] You {state} the desk.")
+        self.presence_announced = present
+
+    def _draw_preview_frame(self, frame, boxes, fps: float) -> None:
         for x, y, w, h in boxes:
             cv2.rectangle(frame, (x, y), (x + w, y + h), (80, 200, 80), 2)
         state = "watching you" if self.presence_announced else "desk empty"
         cv2.putText(
             frame,
-            f"Step-Away: {state}",
+            f"{fps:4.0f} FPS",
             (10, 26),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
             (80, 200, 80),
             2,
         )
+        cv2.putText(
+            frame,
+            f"Step-Away: {state}",
+            (10, 54),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (80, 200, 80),
+            2,
+        )
         cv2.imshow(PREVIEW_WINDOW_TITLE, frame)
-        cv2.waitKey(1)
+
+    def _tick_common(self, now: float, delta: float) -> None:
+        self._announce(self.monitor.vote.present)
+        self._update_security(now)
+        self._update_wellness(now, delta)
+        self._reset_focus_session()
 
     def run(self) -> int:
         print("Step-Away is starting up. Press Ctrl+C to quit.")
         print(f"Streak so far: {self.stats.current_streak()} day(s).")
         self.stats.save()
-        self.monitor.start()
 
-        exit_code = 0
+        if self.show_preview:
+            exit_code = self._run_preview()
+        else:
+            exit_code = self._run_headless()
+
+        if self.show_preview:
+            cv2.destroyAllWindows()
+        else:
+            self.monitor.stop()
+            self.monitor.join(timeout=CHECK_INTERVAL_SECONDS * 2)
+
+            if self.monitor.error:
+                print(f"Stopped: {self.monitor.error}")
+                exit_code = 1
+            elif self.monitor.is_alive():
+                print("Warning: camera thread did not shut down cleanly.")
+                exit_code = 1
+
+        self.stats.save()
+        print()
+        print(self.stats.summary_report())
+        print("Step-Away closed. See you soon!")
+        return exit_code
+
+    def _run_headless(self) -> int:
+        self.monitor.start()
         try:
             while self.monitor.is_alive():
                 now = time.time()
                 delta = min(now - self.last_tick, CHECK_INTERVAL_SECONDS * 2)
                 self.last_tick = now
 
-                present = self.monitor.face_present
-                if present != self.presence_announced:
-                    stamp = time.strftime("%H:%M:%S")
-                    state = "arrived" if present else "left"
-                    print(f"[{stamp}] You {state} the desk.")
-                    self.presence_announced = present
-
-                if self.show_preview:
-                    self._draw_preview()
-
-                self._update_security(now)
-                self._update_wellness(now, delta)
-                self._reset_focus_session()
+                self._tick_common(now, delta)
 
                 if now - self.last_save >= SAVE_INTERVAL_SECONDS:
                     self.stats.save()
@@ -437,25 +485,60 @@ class StepAwayApp:
                 time.sleep(1)
         except KeyboardInterrupt:
             pass
+        return 0
 
-        self.monitor.stop()
-        self.monitor.join(timeout=CHECK_INTERVAL_SECONDS * 2)
+    def _run_preview(self) -> int:
+        try:
+            capture = open_camera(CAMERA_INDEX)
+        except RuntimeError as error:
+            print(f"Stopped: {error}")
+            return 1
 
-        if self.show_preview:
-            cv2.destroyAllWindows()
+        frame_interval = 1.0 / PREVIEW_TARGET_FPS
+        fps = 0.0
+        boxes = []
+        last_detection = 0.0
+        try:
+            with mp.solutions.face_detection.FaceDetection(
+                model_selection=0, min_detection_confidence=MIN_DETECTION_CONFIDENCE
+            ) as detector:
+                while True:
+                    frame_start = time.perf_counter()
+                    now = time.time()
+                    delta = min(now - self.last_tick, CHECK_INTERVAL_SECONDS * 2)
+                    self.last_tick = now
 
-        if self.monitor.error:
-            print(f"Stopped: {self.monitor.error}")
-            exit_code = 1
-        elif self.monitor.is_alive():
-            print("Warning: camera thread did not shut down cleanly.")
-            exit_code = 1
+                    grabbed, frame = capture.read()
+                    if not grabbed:
+                        print("Camera stopped delivering frames.")
+                        break
 
-        self.stats.save()
-        print()
-        print(self.stats.summary_report())
-        print("Step-Away closed. See you soon!")
-        return exit_code
+                    if now - last_detection >= CHECK_INTERVAL_SECONDS:
+                        raw_present, boxes = self.monitor._detect_face(detector, frame)
+                        self.monitor.vote.record(raw_present)
+                        last_detection = now
+
+                    self._tick_common(now, delta)
+                    self._draw_preview_frame(frame, boxes, fps)
+
+                    key = cv2.waitKey(1) & 0xFF
+                    if key in (ord("q"), 0x1B):
+                        break
+
+                    if now - self.last_save >= SAVE_INTERVAL_SECONDS:
+                        self.stats.save()
+                        self.last_save = now
+
+                    elapsed = time.perf_counter() - frame_start
+                    instant = 1.0 / max(elapsed, 1e-6)
+                    fps = instant if fps == 0 else FPS_SMOOTHING * fps + (1 - FPS_SMOOTHING) * instant
+                    remaining = frame_interval - elapsed
+                    if remaining > 0:
+                        time.sleep(remaining)
+        except KeyboardInterrupt:
+            pass
+        capture.release()
+        return 0
 
 
 if __name__ == "__main__":
