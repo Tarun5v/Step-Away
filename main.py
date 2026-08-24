@@ -1042,6 +1042,7 @@ class StepAwayApp:
     """Ties presence monitoring into security and wellness behaviours."""
 
     def __init__(self, debug: bool = False, show_preview: bool = False, demo: bool = False):
+        self.debug = debug
         self.monitor = PresenceMonitor(debug=debug)
         self.show_preview = show_preview
         self._preview_capture = None
