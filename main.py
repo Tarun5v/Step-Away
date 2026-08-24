@@ -95,6 +95,7 @@ ABSENCE_WARNING_SECONDS = 5
 LOCK_COMMAND_TIMEOUT_SECONDS = 5
 LOCK_RETRY_SECONDS = 30
 INPUT_ACTIVITY_GRACE_SECONDS = 5.0
+STARTUP_GRACE_SECONDS = 60
 TERMINAL_APPS = {
     "Terminal",
     "iTerm2",
@@ -1065,6 +1066,8 @@ class StepAwayApp:
         self.drink_detector = DrinkDetector()
         self.last_pose_call = 0.0
         self.last_auto_water_ts = 0.0
+        self.started_at = time.time()
+        self.grace_note_shown = False
 
     def _update_security(self, now: float) -> None:
         face = self.monitor.face_present
@@ -1091,6 +1094,14 @@ class StepAwayApp:
 
         self.input_hold_note_shown = False
 
+        if now - self.started_at < STARTUP_GRACE_SECONDS:
+            if not self.grace_note_shown:
+                remaining = int(STARTUP_GRACE_SECONDS - (now - self.started_at))
+                stamp = time.strftime("%H:%M:%S")
+                print(f"[{stamp}] Guard warming up - auto-lock arms in ~{remaining}s.")
+                self.grace_note_shown = True
+            return
+
         if self.absent_since is None:
             self.absent_since = now
             return
@@ -1109,6 +1120,17 @@ class StepAwayApp:
                 remaining = round(ABSENCE_LOCK_SECONDS - absence)
                 print(f"Desk empty - locking in {remaining}s. Hop back in view to cancel.")
                 self.warned = True
+
+    def _warm_pose_model(self) -> None:
+        """Load the pose model off the main loop so drink checks never stall."""
+        try:
+            import numpy as np
+
+            _get_pose().process(np.zeros((64, 64, 3), dtype=np.uint8))
+            stamp = time.strftime("%H:%M:%S")
+            print(f"[{stamp}] Drink detector ready.")
+        except Exception as error:
+            print(f"Drink detector unavailable: {error.__class__.__name__}")
 
     def _consider_drink(self, now: float) -> None:
         """Run pose detection at most once a second; log deduped drinks."""
@@ -1270,6 +1292,7 @@ class StepAwayApp:
 
     def run(self) -> int:
         print("Step-Away is starting up. Press Ctrl+C to quit.")
+        threading.Thread(target=self._warm_pose_model, daemon=True).start()
         if self.stretch_interval == DEMO_STRETCH_SECONDS:
             print(
                 f"Demo mode: break screen every {DEMO_STRETCH_SECONDS}s "

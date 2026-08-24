@@ -6,10 +6,10 @@ stretch when you have been focused for too long.
 
 ## Features
 
-- **Auto-lock security** - after 5 seconds away you get a warning; if you are
-  still gone at the 10-second mark, the screen locks. Mouse or keyboard
-  activity counts as presence too: if you are out of frame but actively
-  using the machine, it stays unlocked.
+- **Auto-lock security** - after a 60-second warm-up the guard arms: 5
+  seconds away triggers a warning and at the 10-second mark the screen
+  locks. Mouse or keyboard activity counts as presence too: if you are out
+  of frame but actively using the machine, it stays unlocked.
 - **Kiosk-style wellness screens** - while a break or eye-rest card is up,
   the dock and menu bar hide, app switching is blocked, and focus keeps
   returning to the card until you press a key or click.
@@ -92,6 +92,7 @@ Tune the behaviour by editing the constants at the top of `main.py`:
 | `DRINK_DEDUP_SECONDS`    | `240`   | Minimum gap between auto-logged glasses |
 | `BREAK_AWAY_SECONDS`     | `60`    | Away-from-desk seconds before the break screen releases |
 | `INPUT_ACTIVITY_GRACE_SECONDS` | `5` | Mouse/keyboard idle gap still counted as presence |
+| `STARTUP_GRACE_SECONDS`  | `60`    | Delay after launch before auto-lock arms      |
 | `OVERLAY_FOCUS_GUARD_SECONDS`  | `0.25` | How often overlays reclaim focus while up |
 | `EYE_REST_AWAY_SECONDS`  | `20`    | Away-look seconds before the eye screen releases |
 | `OVERLAY_COOLDOWN_SECONDS`| `60`   | Minimum quiet gap between wellness screens    |
