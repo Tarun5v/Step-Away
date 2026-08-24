@@ -9,8 +9,10 @@ stretch when you have been focused for too long.
 - **Auto-lock security** - after 5 seconds away you get a warning; if you are
   still gone at the 10-second mark, the screen locks with `Cmd+Ctrl+Q`.
 - **Wellness breaks** - after 50 minutes of uninterrupted focus, the screen
-  fades into a full-screen blurred break card, Screen Time style: "You've
-  reached your focus limit. Stand up, stretch, breathe."
+  fades into a full-screen blurred break card that will not dismiss itself:
+  it cycles through stretch instructions ("Stand up.", "Walk to the far
+  side of the room.") and only releases once the camera confirms you have
+  actually been up and away for a minute.
 - **20-20-20 eye rule** - every 20 minutes at the desk a blurred eye-rest
   screen appears, and it does not blink first: it stays up until gaze
   tracking confirms you actually looked away for 20 seconds. Keep staring
@@ -75,8 +77,8 @@ Tune the behaviour by editing the constants at the top of `main.py`:
 | `PREVIEW_TARGET_FPS`     | `60`    | Frame rate target for the `--preview` window  |
 | `FOCUS_REMINDER_MINUTES` | `50`    | Uninterrupted focus minutes per stretch nudge |
 | `EYE_RULE_MINUTES`       | `20`    | Minutes between 20-20-20 eye-rest screens     |
+| `BREAK_AWAY_SECONDS`     | `60`    | Away-from-desk seconds before the break screen releases |
 | `EYE_REST_AWAY_SECONDS`  | `20`    | Away-look seconds before the eye screen releases |
-| `BREAK_OVERLAY_SECONDS`  | `30`    | Auto-dismiss time of the focus break screen   |
 | `OVERLAY_COOLDOWN_SECONDS`| `60`   | Minimum quiet gap between wellness screens    |
 | `BREAK_THRESHOLD_SECONDS`| `300`   | Away-time that counts as a real break         |
 
