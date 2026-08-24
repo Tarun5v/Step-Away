@@ -26,6 +26,7 @@ PRESENCE_MIN_HITS = 2
 MIN_DETECTION_CONFIDENCE = 0.4
 DEMO_STRETCH_SECONDS = 40
 DEMO_EYE_REST_SECONDS = 10
+DEMO_OVERLAY_COOLDOWN_SECONDS = 5
 DRAIN_GRABS = 6
 PREVIEW_TARGET_FPS = 60
 FPS_SMOOTHING = 0.9
@@ -93,6 +94,7 @@ EYE_RULE_MINUTES = 20
 BREAK_THRESHOLD_SECONDS = 300
 BREAK_OVERLAY_SECONDS = 30
 EYE_REST_OVERLAY_SECONDS = 20
+OVERLAY_COOLDOWN_SECONDS = 60
 EYE_REST_POLL_SECONDS = 1.0
 EYE_REST_NAG_STEP_SECONDS = 4.0
 EYE_REST_NAG_MESSAGES = [
@@ -730,11 +732,14 @@ class StepAwayApp:
             self.eye_rest_interval = DEMO_EYE_REST_SECONDS
             self.break_overlay_duration = 8
             self.eye_overlay_duration = 5
+            self.overlay_cooldown = DEMO_OVERLAY_COOLDOWN_SECONDS
         else:
             self.stretch_interval = FOCUS_REMINDER_MINUTES * 60
             self.eye_rest_interval = EYE_RULE_MINUTES * 60
             self.break_overlay_duration = BREAK_OVERLAY_SECONDS
             self.eye_overlay_duration = EYE_REST_OVERLAY_SECONDS
+            self.overlay_cooldown = OVERLAY_COOLDOWN_SECONDS
+        self.last_overlay_closed_at = 0.0
 
     def _update_security(self, now: float) -> None:
         if self.monitor.face_present:
@@ -769,6 +774,8 @@ class StepAwayApp:
     def _update_wellness(self, now: float, delta: float) -> None:
         if self.monitor.face_present:
             self.stats.add_focus(delta)
+            if now - self.last_overlay_closed_at < self.overlay_cooldown:
+                return
 
             if self.focus_start is None:
                 self.focus_start = now
@@ -781,7 +788,9 @@ class StepAwayApp:
                     "You've reached your focus limit. Stand up, stretch, breathe.",
                     self.break_overlay_duration,
                 )
-                self.focus_start = time.time()
+                self.last_overlay_closed_at = time.time()
+                self.focus_start = self.last_overlay_closed_at
+                self.eye_rest_start = None
 
             if self.eye_rest_start is None:
                 self.eye_rest_start = now
@@ -796,7 +805,8 @@ class StepAwayApp:
                     self.eye_overlay_duration,
                     on_title_refresh=nagger.next_message,
                 )
-                self.eye_rest_start = time.time()
+                self.last_overlay_closed_at = time.time()
+                self.eye_rest_start = self.last_overlay_closed_at
 
             return
 

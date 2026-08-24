@@ -76,6 +76,7 @@ Tune the behaviour by editing the constants at the top of `main.py`:
 | `EYE_RULE_MINUTES`       | `20`    | Minutes between 20-20-20 eye-rest screens     |
 | `BREAK_OVERLAY_SECONDS`  | `30`    | Auto-dismiss time of the focus break screen   |
 | `EYE_REST_OVERLAY_SECONDS`| `20`   | How long the eye-rest screen stays up         |
+| `OVERLAY_COOLDOWN_SECONDS`| `60`   | Minimum quiet gap between wellness screens    |
 | `BREAK_THRESHOLD_SECONDS`| `300`   | Away-time that counts as a real break         |
 
 ## Privacy
