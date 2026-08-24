@@ -23,6 +23,10 @@ CHECK_INTERVAL_SECONDS = 3
 PRESENCE_WINDOW_SIZE = 5
 PRESENCE_MIN_HITS = 2
 MIN_DETECTION_CONFIDENCE = 0.4
+DRAIN_GRABS = 6
+DEBUG_FRAME_DIR = ".debug_frames"
+DEBUG_SNAPSHOT_LIMIT = 40
+MOTION_RESIZE_WIDTH = 160
 ABSENCE_LOCK_SECONDS = 10
 ABSENCE_WARNING_SECONDS = 5
 LOCK_COMMAND_TIMEOUT_SECONDS = 5
@@ -44,6 +48,8 @@ class PresenceMonitor(threading.Thread):
         self._recent_hits = deque(maxlen=PRESENCE_WINDOW_SIZE)
         self._running = True
         self.error = None
+        self._prev_motion_frame = None
+        self._snapshot_index = 0
 
     @property
     def face_present(self) -> bool:
@@ -95,19 +101,67 @@ class PresenceMonitor(threading.Thread):
                     continue
 
                 failed_reads = 0
+                frame = self._read_fresh_frame(capture)
+                if frame is None:
+                    failed_reads += 1
+                    if failed_reads >= 5:
+                        self.error = (
+                            "Camera stopped delivering frames. "
+                            "Check macOS camera permission for your terminal app."
+                        )
+                        break
+                    time.sleep(CHECK_INTERVAL_SECONDS)
+                    continue
+
                 raw_present = self._detect_face(detector, frame)
+                motion = self._motion_score(frame)
                 with self._state_lock:
                     self._recent_hits.append(raw_present)
+                    hits = sum(self._recent_hits)
 
                 if self.debug:
-                    hits = sum(self._recent_hits)
                     stamp = time.strftime("%H:%M:%S")
                     verdict = "HIT " if raw_present else "MISS"
-                    print(f"[{stamp}] check {verdict} window {hits}/{len(self._recent_hits)}")
+                    print(
+                        f"[{stamp}] check {verdict} window {hits}/"
+                        f"{len(self._recent_hits)} motion {motion:.1f}"
+                    )
+                    self._save_debug_snapshot(frame, raw_present)
 
                 time.sleep(CHECK_INTERVAL_SECONDS)
 
         capture.release()
+
+    def _read_fresh_frame(self, capture):
+        """Drain buffered frames so analysis always uses the live image."""
+        frame = None
+        grabbed = False
+        for _ in range(DRAIN_GRABS):
+            grabbed, frame = capture.read()
+            if not grabbed:
+                return None
+        return frame if grabbed else None
+
+    def _motion_score(self, frame) -> float:
+        """Mean pixel change since the previous check (0 = identical image)."""
+        height = max(1, int(frame.shape[0] * MOTION_RESIZE_WIDTH / frame.shape[1]))
+        small = cv2.cvtColor(
+            cv2.resize(frame, (MOTION_RESIZE_WIDTH, height)), cv2.COLOR_BGR2GRAY
+        ).astype("float32")
+        if self._prev_motion_frame is None:
+            self._prev_motion_frame = small
+            return 0.0
+        score = float(abs(small - self._prev_motion_frame).mean())
+        self._prev_motion_frame = small
+        return score
+
+    def _save_debug_snapshot(self, frame, hit: bool) -> None:
+        out_dir = Path(DEBUG_FRAME_DIR)
+        out_dir.mkdir(exist_ok=True)
+        self._snapshot_index = self._snapshot_index % DEBUG_SNAPSHOT_LIMIT + 1
+        tag = "hit" if hit else "miss"
+        stamp = time.strftime("%H%M%S")
+        cv2.imwrite(str(out_dir / f"check_{stamp}_{tag}_{self._snapshot_index}.jpg"), frame)
 
 
 def lock_screen() -> bool:

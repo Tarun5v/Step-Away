@@ -38,6 +38,7 @@ venv/
 
 # App data
 step_away_stats.json
+.debug_frames/
 
 # Misc
 coverage/
