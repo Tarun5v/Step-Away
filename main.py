@@ -67,7 +67,14 @@ ABSENCE_WARNING_SECONDS = 5
 LOCK_COMMAND_TIMEOUT_SECONDS = 5
 LOCK_RETRY_SECONDS = 30
 FOCUS_REMINDER_MINUTES = 50
+EYE_RULE_MINUTES = 20
 BREAK_THRESHOLD_SECONDS = 300
+DAY_DEFAULTS = {
+    "focus_seconds": 0,
+    "reminders": 0,
+    "breaks": 0,
+    "eye_rests": 0,
+}
 STATS_FILE = "step_away_stats.json"
 SAVE_INTERVAL_SECONDS = 60
 
@@ -304,15 +311,19 @@ class StatsStore:
         self.meta["setup_shown"] = True
 
     def _today(self) -> dict:
-        return self.days.setdefault(
-            date.today().isoformat(), {"focus_seconds": 0, "reminders": 0, "breaks": 0}
-        )
+        today = self.days.setdefault(date.today().isoformat(), {})
+        for key, default in DAY_DEFAULTS.items():
+            today.setdefault(key, default)
+        return today
 
     def add_focus(self, seconds: float) -> None:
         self._today()["focus_seconds"] += int(seconds)
 
     def record_reminder(self) -> None:
         self._today()["reminders"] += 1
+
+    def record_eye_rest(self) -> None:
+        self._today()["eye_rests"] += 1
 
     def record_break(self) -> None:
         self._today()["breaks"] += 1
@@ -339,6 +350,7 @@ class StatsStore:
             "Today's report",
             f"  Focus time:     {format_duration(today['focus_seconds'])}",
             f"  Stretch nudges: {today['reminders']}",
+            f"  Eye-rest nudges: {today['eye_rests']}",
             f"  Breaks taken:   {today['breaks']}",
             f"  Current streak: {streak} day{'s' if streak != 1 else ''}",
         ]
@@ -432,6 +444,7 @@ class StepAwayApp:
         self.locked = False
         self.warned = False
         self.focus_start = None
+        self.eye_rest_start = None
         self.break_counted = True
         self.next_lock_attempt = 0.0
         self.last_tick = time.time()
@@ -480,6 +493,17 @@ class StepAwayApp:
                 minutes = FOCUS_REMINDER_MINUTES
                 print(f"[{stamp}] {minutes} minutes of focus - stretch nudge sent.")
                 self.focus_start = now
+
+            if self.eye_rest_start is None:
+                self.eye_rest_start = now
+            elif now - self.eye_rest_start >= EYE_RULE_MINUTES * 60:
+                send_stretch_notification(
+                    message="20-20-20: look at something 6 metres away for 20 seconds."
+                )
+                self.stats.record_eye_rest()
+                stamp = time.strftime("%H:%M:%S")
+                print(f"[{stamp}] 20-20-20 eye-rest nudge sent.")
+                self.eye_rest_start = now
             return
 
         if self.absent_since is None:
@@ -495,6 +519,7 @@ class StepAwayApp:
             return
         if not self.monitor.face_present:
             self.focus_start = None
+            self.eye_rest_start = None
             self.break_counted = False
 
     def _announce(self, present: bool) -> None:
