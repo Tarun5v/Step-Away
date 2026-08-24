@@ -1158,7 +1158,10 @@ class StepAwayApp:
         if gap < EYE_REST_POLL_SECONDS:
             return
         self.last_pose_call = now
-        frame = self._eye_rest_frame_provider()
+        read_frame = self._eye_rest_frame_provider()
+        if not callable(read_frame):
+            return
+        frame = read_frame()
         if frame is None:
             return
         drinking_now = self.drink_detector.consider(frame, gap)
@@ -1320,7 +1323,7 @@ class StepAwayApp:
             return from_preview
 
         def from_monitor():
-            return self.monitor.latest_frame
+            return self.monitor.latest_frame()
 
         return from_monitor
 
