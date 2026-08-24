@@ -107,6 +107,10 @@ TERMINAL_APPS = {
 }
 FOCUS_REMINDER_MINUTES = 50
 EYE_RULE_MINUTES = 20
+DAILY_WATER_GOAL = 8
+DRINK_GESTURE_SECONDS = 2.5
+DRINK_DEDUP_SECONDS = 4 * 60
+WRIST_MOUTH_RATIO = 0.55
 BREAK_THRESHOLD_SECONDS = 300
 BREAK_AWAY_SECONDS = 60
 DEMO_BREAK_AWAY_SECONDS = 5
@@ -449,6 +453,80 @@ def face_in_frame(frame) -> bool:
     return bool(result.multi_face_landmarks)
 
 
+_pose_lock = threading.Lock()
+_pose = None
+
+
+def _get_pose():
+    """Lazily create the shared lightweight pose model for drink detection."""
+    global _pose
+    with _pose_lock:
+        if _pose is None:
+            import mediapipe as mp
+
+            with QuietStderr():
+                _pose = mp.solutions.pose.Pose(
+                    static_image_mode=False,
+                    model_complexity=0,
+                    min_detection_confidence=0.5,
+                )
+    return _pose
+
+
+def _is_drinking(landmarks) -> bool:
+    """True when a wrist is raised to mouth height near the head.
+
+    Landmarks are normalised BlazePose points; distances are scaled by
+    shoulder width so the check is distance-invariant.
+    """
+    mouth_x = (landmarks[9].x + landmarks[10].x) / 2
+    mouth_y = (landmarks[9].y + landmarks[10].y) / 2
+    span = max(abs(landmarks[12].x - landmarks[11].x), 1e-4)
+    for index in (15, 16):
+        wrist = landmarks[index]
+        if (
+            wrist.y < mouth_y + 0.02
+            and abs(wrist.x - mouth_x) < WRIST_MOUTH_RATIO * span
+        ):
+            return True
+    return False
+
+
+class DrinkDetector:
+    """Watches for the sustained hand-to-mouth gesture of drinking.
+
+    A brief face touch does not count; the pose must hold for
+    DRINK_GESTURE_SECONDS before consider() fires once and re-arms.
+    """
+
+    def __init__(self):
+        self.sustained = 0.0
+
+    def consider(self, frame, seconds: float) -> bool:
+        import cv2 as _cv2
+
+        try:
+            pose = _get_pose()
+            image = _cv2.cvtColor(frame, _cv2.COLOR_BGR2RGB)
+            with QuietStderr():
+                result = pose.process(image)
+        except Exception:
+            self.sustained = 0.0
+            return False
+
+        landmarks = (
+            result.pose_landmarks.landmark if result.pose_landmarks else None
+        )
+        if landmarks is not None and _is_drinking(landmarks):
+            self.sustained += min(max(seconds, 0.0), 2.0)
+            if self.sustained >= DRINK_GESTURE_SECONDS:
+                self.sustained = 0.0
+                return True
+        else:
+            self.sustained = 0.0
+        return False
+
+
 class StretchNagger:
     """Holds the break screen open until the user is actually up and about.
 
@@ -743,6 +821,42 @@ def format_duration(total_seconds: int) -> str:
     return f"{seconds}s"
 
 
+def _water_streak(days: dict, goal: int = DAILY_WATER_GOAL) -> int:
+    """Consecutive days (ending today or yesterday) that hit the water goal.
+
+    Today only counts once the goal is already reached; otherwise the run
+    starts from yesterday, Snapchat-style.
+    """
+    day = date.today()
+    if days.get(day.isoformat(), {}).get("water_glasses", 0) < goal:
+        day -= timedelta(days=1)
+    streak = 0
+    while days.get(day.isoformat(), {}).get("water_glasses", 0) >= goal:
+        streak += 1
+        day -= timedelta(days=1)
+    return streak
+
+
+def _best_water_streak(days: dict, goal: int = DAILY_WATER_GOAL) -> int:
+    """Longest goal-hitting run anywhere in the recorded history.
+
+    Days with no entry count as missed so gaps break the chain.
+    """
+    if not days:
+        return 0
+    earliest = min(date.fromisoformat(iso) for iso in days)
+    best = run = 0
+    day = earliest
+    while day <= date.today():
+        if days.get(day.isoformat(), {}).get("water_glasses", 0) >= goal:
+            run += 1
+            best = max(best, run)
+        else:
+            run = 0
+        day += timedelta(days=1)
+    return best
+
+
 class StatsStore:
     """Persists daily focus time, reminders and breaks to a local JSON file."""
 
@@ -800,6 +914,12 @@ class StatsStore:
     def water_today(self) -> int:
         return self._today().get("water_glasses", 0)
 
+    def water_streak(self) -> int:
+        return _water_streak(self.days)
+
+    def best_water_streak(self) -> int:
+        return _best_water_streak(self.days)
+
     def record_break(self) -> None:
         self._today()["breaks"] += 1
 
@@ -826,7 +946,8 @@ class StatsStore:
             f"  Focus time:     {format_duration(today['focus_seconds'])}",
             f"  Stretch nudges: {today['reminders']}",
             f"  Eye-rest nudges: {today['eye_rests']}",
-            f"  Water logged:   {today.get('water_glasses', 0)} glass(es)",
+            f"  Water logged:   {today.get('water_glasses', 0)}/{DAILY_WATER_GOAL} glass(es)",
+            f"  Water streak:   {self.water_streak()} day(s) (best {self.best_water_streak()})",
             f"  Breaks taken:   {today['breaks']}",
             f"  Current streak: {streak} day{'s' if streak != 1 else ''}",
         ]
@@ -941,6 +1062,9 @@ class StepAwayApp:
             self.overlay_cooldown = OVERLAY_COOLDOWN_SECONDS
         self.last_overlay_closed_at = 0.0
         self.input_hold_note_shown = False
+        self.drink_detector = DrinkDetector()
+        self.last_pose_call = 0.0
+        self.last_auto_water_ts = 0.0
 
     def _update_security(self, now: float) -> None:
         face = self.monitor.face_present
@@ -986,9 +1110,42 @@ class StepAwayApp:
                 print(f"Desk empty - locking in {remaining}s. Hop back in view to cancel.")
                 self.warned = True
 
+    def _consider_drink(self, now: float) -> None:
+        """Run pose detection at most once a second; log deduped drinks."""
+        gap = now - self.last_pose_call
+        if gap < EYE_REST_POLL_SECONDS:
+            return
+        self.last_pose_call = now
+        frame = self._eye_rest_frame_provider()
+        if frame is None or not self.drink_detector.consider(frame, gap):
+            return
+        if now - self.last_auto_water_ts < DRINK_DEDUP_SECONDS:
+            return
+        self.last_auto_water_ts = now
+        self._announce_water(self.stats.record_water(), auto=True)
+
+    def _announce_water(self, count: int, auto: bool = False) -> None:
+        stamp = time.strftime("%H:%M:%S")
+        verb = "Detected a drink" if auto else "Logged a glass"
+        goal = DAILY_WATER_GOAL
+        if count == goal:
+            print(f"[{stamp}] {verb} ({count}/{goal}) - daily goal hit, streak secured!")
+        elif count > goal:
+            print(f"[{stamp}] {verb} ({count}/{goal}) - bonus glass.")
+        else:
+            streak = self.stats.water_streak()
+            remaining = goal - count
+            tail = (
+                f"{remaining} more today keeps the {streak}-day streak."
+                if streak
+                else f"{remaining} more today starts your streak."
+            )
+            print(f"[{stamp}] {verb} ({count}/{goal}). {tail}")
+
     def _update_wellness(self, now: float, delta: float) -> None:
         if self.monitor.face_present:
             self.stats.add_focus(delta)
+            self._consider_drink(now)
             if now - self.last_overlay_closed_at < self.overlay_cooldown:
                 return
 
@@ -1081,7 +1238,7 @@ class StepAwayApp:
         )
         cv2.putText(
             frame,
-            f"water: {self.stats.water_today()} glasses (w to log)",
+            f"water {self.stats.water_today()}/{DAILY_WATER_GOAL} | streak {self.stats.water_streak()}d (w)",
             (10, 82),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
@@ -1120,6 +1277,10 @@ class StepAwayApp:
                 f"{DEMO_EYE_REST_SECONDS}s (until you look away for 3s)."
             )
         print(f"Streak so far: {self.stats.current_streak()} day(s).")
+        print(
+            f"Water streak: {self.stats.water_streak()} day(s) "
+            f"(best {self.stats.best_water_streak()}) - goal {DAILY_WATER_GOAL} glasses/day."
+        )
         if not self.stats.setup_acknowledged:
             print(FIRST_RUN_CHECKLIST)
             self.stats.mark_setup_shown()
@@ -1210,10 +1371,8 @@ class StepAwayApp:
 
                     key = cv2.waitKey(1) & 0xFF
                     if key == ord("w"):
-                        glasses = self.stats.record_water()
+                        self._announce_water(self.stats.record_water())
                         self.stats.save()
-                        stamp = time.strftime("%H:%M:%S")
-                        print(f"[{stamp}] Logged a glass of water ({glasses} today).")
                     elif key in (ord("q"), 0x1B):
                         break
 
