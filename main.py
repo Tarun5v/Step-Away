@@ -89,6 +89,12 @@ class PresenceVote:
         with self._lock:
             return sum(self._hits), len(self._hits)
 
+    @property
+    def settled(self) -> bool:
+        """True once the window holds enough samples to trust the verdict."""
+        with self._lock:
+            return len(self._hits) >= PRESENCE_MIN_HITS
+
 
 ABSENCE_LOCK_SECONDS = 10
 ABSENCE_WARNING_SECONDS = 5
@@ -112,6 +118,7 @@ DAILY_WATER_GOAL = 8
 DRINK_GESTURE_SECONDS = 2.0
 DRINK_DEDUP_SECONDS = 4 * 60
 WRIST_MOUTH_RATIO = 0.6
+MIN_DRINK_RADIUS = 0.13
 BREAK_THRESHOLD_SECONDS = 300
 BREAK_AWAY_SECONDS = 60
 DEMO_BREAK_AWAY_SECONDS = 5
@@ -477,21 +484,30 @@ def _get_pose():
 def _is_drinking(landmarks) -> bool:
     """True when a hand is raised into drinking position near the face.
 
-    The wrist-to-mouth distance is scaled by shoulder width so it works
-    at any distance from the camera, and a bottle grip below the mouth
-    still lands inside the radius. A shoulder-line gate keeps resting
-    hands out.
+    The wrist-to-face distance is scaled by shoulder width but floored at
+    an absolute minimum, because tight head-and-shoulders webcam framing
+    can shrink the measured shoulder span to almost nothing. The nose
+    anchors a second check for grips that hide the mouth corners, and
+    low-visibility wrists (cropped or occluded) are skipped.
     """
-    mouth_x = (landmarks[9].x + landmarks[10].x) / 2
-    mouth_y = (landmarks[9].y + landmarks[10].y) / 2
     left_sh = landmarks[11]
     right_sh = landmarks[12]
     span = max(abs(right_sh.x - left_sh.x), 1e-4)
     shoulder_line = max(left_sh.y, right_sh.y)
+    mouth_x = (landmarks[9].x + landmarks[10].x) / 2
+    mouth_y = (landmarks[9].y + landmarks[10].y) / 2
+    nose = landmarks[0]
+    radius = max(WRIST_MOUTH_RATIO * span, MIN_DRINK_RADIUS)
+
     for index in (15, 16):
         wrist = landmarks[index]
-        distance = ((wrist.x - mouth_x) ** 2 + (wrist.y - mouth_y) ** 2) ** 0.5
-        if distance < WRIST_MOUTH_RATIO * span and wrist.y < shoulder_line + 0.05:
+        if getattr(wrist, "visibility", 1.0) < 0.4:
+            continue
+        d_mouth = ((wrist.x - mouth_x) ** 2 + (wrist.y - mouth_y) ** 2) ** 0.5
+        d_nose = ((wrist.x - nose.x) ** 2 + (wrist.y - nose.y) ** 2) ** 0.5
+        if (
+            d_mouth < radius or d_nose < radius
+        ) and wrist.y < shoulder_line + 0.05:
             return True
     return False
 
@@ -1080,6 +1096,12 @@ class StepAwayApp:
 
     def _update_security(self, now: float) -> None:
         face = self.monitor.face_present
+
+        # The vote needs a couple of samples before "absent" means anything;
+        # never nag or count down while the camera is still forming its view.
+        if not face and not self.monitor.vote.settled:
+            return
+
         idle = None if face else _input_idle_seconds()
         attended = face or (
             idle is not None and idle < INPUT_ACTIVITY_GRACE_SECONDS
@@ -1151,12 +1173,10 @@ class StepAwayApp:
         if frame is None:
             return
         drinking_now = self.drink_detector.consider(frame, gap)
-        if self.debug and (
-            drinking_now or self.drink_detector.sustained > 0.1
-        ):
+        if drinking_now or self.drink_detector.sustained > 0.5:
             stamp = time.strftime("%H:%M:%S")
             print(
-                f"[{stamp}] drink pose {self.drink_detector.sustained:.1f}s"
+                f"[{stamp}] drink: {self.drink_detector.sustained:.1f}s"
                 f"{' - LOGGED' if drinking_now else ''}"
             )
         if not drinking_now:
