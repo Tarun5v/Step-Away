@@ -4,11 +4,13 @@ Watches for you at the desk, locks the machine when you step away,
 and nudges you to stretch after long focus sessions.
 """
 
+import argparse
 import json
 import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -18,8 +20,9 @@ import mediapipe as mp
 
 CAMERA_INDEX = 0
 CHECK_INTERVAL_SECONDS = 3
-MISSES_TO_MARK_ABSENT = 2
-HITS_TO_MARK_PRESENT = 1
+PRESENCE_WINDOW_SIZE = 5
+PRESENCE_MIN_HITS = 2
+MIN_DETECTION_CONFIDENCE = 0.4
 ABSENCE_LOCK_SECONDS = 10
 ABSENCE_WARNING_SECONDS = 5
 LOCK_COMMAND_TIMEOUT_SECONDS = 5
@@ -33,20 +36,19 @@ SAVE_INTERVAL_SECONDS = 60
 class PresenceMonitor(threading.Thread):
     """Background thread that keeps track of whether anyone sits at the desk."""
 
-    def __init__(self, camera_index: int = CAMERA_INDEX):
+    def __init__(self, camera_index: int = CAMERA_INDEX, debug: bool = False):
         super().__init__(daemon=True)
         self.camera_index = camera_index
+        self.debug = debug
         self._state_lock = threading.Lock()
-        self._face_present = False
-        self._pending_present = False
-        self._pending_count = 0
+        self._recent_hits = deque(maxlen=PRESENCE_WINDOW_SIZE)
         self._running = True
         self.error = None
 
     @property
     def face_present(self) -> bool:
         with self._state_lock:
-            return self._face_present
+            return sum(self._recent_hits) >= PRESENCE_MIN_HITS
 
     def stop(self) -> None:
         self._running = False
@@ -76,7 +78,7 @@ class PresenceMonitor(threading.Thread):
             return
 
         with mp.solutions.face_detection.FaceDetection(
-            model_selection=0, min_detection_confidence=0.5
+            model_selection=0, min_detection_confidence=MIN_DETECTION_CONFIDENCE
         ) as detector:
             failed_reads = 0
             while self._running:
@@ -95,37 +97,17 @@ class PresenceMonitor(threading.Thread):
                 failed_reads = 0
                 raw_present = self._detect_face(detector, frame)
                 with self._state_lock:
-                    changed = self._apply_debounce(raw_present)
-                    present = self._face_present
+                    self._recent_hits.append(raw_present)
 
-                if changed:
-                    state = "arrived" if present else "left"
+                if self.debug:
+                    hits = sum(self._recent_hits)
                     stamp = time.strftime("%H:%M:%S")
-                    print(f"[{stamp}] You {state} the desk.")
+                    verdict = "HIT " if raw_present else "MISS"
+                    print(f"[{stamp}] check {verdict} window {hits}/{len(self._recent_hits)}")
 
                 time.sleep(CHECK_INTERVAL_SECONDS)
 
         capture.release()
-
-    def _apply_debounce(self, raw_present: bool) -> bool:
-        """Flip the stable state only after repeated identical readings."""
-        if raw_present == self._face_present:
-            self._pending_count = 0
-            return False
-
-        needed = HITS_TO_MARK_PRESENT if raw_present else MISSES_TO_MARK_ABSENT
-        if self._pending_present == raw_present:
-            self._pending_count += 1
-        else:
-            self._pending_present = raw_present
-            self._pending_count = 1
-
-        if self._pending_count < needed:
-            return False
-
-        self._face_present = raw_present
-        self._pending_count = 0
-        return True
 
 
 def lock_screen() -> bool:
@@ -251,8 +233,9 @@ class StatsStore:
 class StepAwayApp:
     """Ties presence monitoring into security and wellness behaviours."""
 
-    def __init__(self):
-        self.monitor = PresenceMonitor()
+    def __init__(self, debug: bool = False):
+        self.monitor = PresenceMonitor(debug=debug)
+        self.presence_announced = False
         self.stats = StatsStore()
         self.absent_since = None
         self.locked = False
@@ -336,6 +319,13 @@ class StepAwayApp:
                 delta = min(now - self.last_tick, CHECK_INTERVAL_SECONDS * 2)
                 self.last_tick = now
 
+                present = self.monitor.face_present
+                if present != self.presence_announced:
+                    stamp = time.strftime("%H:%M:%S")
+                    state = "arrived" if present else "left"
+                    print(f"[{stamp}] You {state} the desk.")
+                    self.presence_announced = present
+
                 self._update_security(now)
                 self._update_wellness(now, delta)
                 self._reset_focus_session()
@@ -366,4 +356,9 @@ class StepAwayApp:
 
 
 if __name__ == "__main__":
-    sys.exit(StepAwayApp().run())
+    parser = argparse.ArgumentParser(description="Step-Away presence guard")
+    parser.add_argument(
+        "--debug", action="store_true", help="print every webcam check result"
+    )
+    args = parser.parse_args()
+    sys.exit(StepAwayApp(debug=args.debug).run())
