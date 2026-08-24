@@ -119,9 +119,12 @@ DRINK_GESTURE_SECONDS = 1.5
 DRINK_DEDUP_SECONDS = 4 * 60
 HAND_SCORE_MIN = 0.5
 POSE_MIN_VISIBILITY = 0.3
-WRIST_MOUTH_RATIO = 0.6
-MIN_DRINK_RADIUS = 0.18
+WRIST_MOUTH_RATIO = 0.8
+MIN_DRINK_RADIUS = 0.22
 POSE_SHOULDER_GATE = 0.12
+FACE_LOSS_GRACE_SECONDS = 3
+DRINK_SIGNAL_GRACE_SECONDS = 1.5
+DRINK_DECAY_RATE = 0.4
 BREAK_THRESHOLD_SECONDS = 300
 BREAK_AWAY_SECONDS = 60
 DEMO_BREAK_AWAY_SECONDS = 5
@@ -526,7 +529,7 @@ def _lip_zone(face):
     }
 
 
-def _drink_metrics(hands_result, pose_result, face_result) -> dict:
+def _drink_metrics(hands_result, pose_result, zone, frozen=False) -> dict:
     """Judge drinking HydroVisor-style: does something cup-sized touch the lips?
 
     A hand wrapped around a mug stops looking like a hand, so no single
@@ -538,13 +541,10 @@ def _drink_metrics(hands_result, pose_result, face_result) -> dict:
     - pose: either wrist inside the zone's reach radius, gated by
       visibility and an above-shoulder check to reject desk hands.
 
-    Phantom detections far from the lips satisfy neither.
+    Phantom detections far from the lips satisfy neither. The zone may
+    be carried over from the previous read while the face is briefly
+    hidden behind the cup mid-sip; frozen marks those reads.
     """
-    face_lists = getattr(face_result, "multi_face_landmarks", None)
-    if not face_lists:
-        return {"why": "no_face", "drinking": False}
-    zone = _lip_zone(face_lists[0].landmark)
-
     obs = {}
 
     hand_lists = getattr(hands_result, "multi_hand_landmarks", None)
@@ -597,6 +597,8 @@ def _drink_metrics(hands_result, pose_result, face_result) -> dict:
         obs["wrist_vis"] = round(best_wrist[1], 2)
     obs["pose"] = pose_hit
 
+    if frozen:
+        obs["frozen"] = True
     obs["drinking"] = hand_hit or pose_hit
     return obs
 
@@ -606,17 +608,25 @@ class DrinkDetector:
 
     Two trackers vote on whether anything cup-like is at the mouth; the
     verdict must hold for DRINK_GESTURE_SECONDS before consider() fires
-    once and re-arms. Progress decays gently between sips instead of
-    resetting.
+    once and re-arms. Real sips flicker - the cup hides the face, the
+    wrist crosses the radius boundary - so the lip zone is cached for a
+    few seconds when the face vanishes, progress only decays after a
+    grace period of no signal, and decay itself is slow.
     """
 
     def __init__(self):
         self.sustained = 0.0
         self.last_obs = {}
+        self._zone = None
+        self._zone_ts = 0.0
+        self._positive_ts = None
 
-    def consider(self, frame, seconds: float) -> bool:
+    def consider(self, frame, seconds: float, now=None) -> bool:
+        import time as _time
         import cv2 as _cv2
 
+        if now is None:
+            now = _time.time()
         try:
             image = _cv2.cvtColor(frame, _cv2.COLOR_BGR2RGB)
             with QuietStderr():
@@ -628,18 +638,40 @@ class DrinkDetector:
             self.last_obs = {"error": f"{type(error).__name__}: {error}"[:140]}
             return False
 
-        self.last_obs = _drink_metrics(hands_result, pose_result, face_result)
-        drinking = bool(self.last_obs.get("drinking"))
+        face_lists = getattr(face_result, "multi_face_landmarks", None)
+        frozen = False
+        if face_lists:
+            zone = _lip_zone(face_lists[0].landmark)
+            self._zone = zone
+            self._zone_ts = now
+        elif self._zone is not None and now - self._zone_ts <= FACE_LOSS_GRACE_SECONDS:
+            # Mid-sip the cup often covers the face; keep judging against
+            # the last known lip position instead of dropping the frame.
+            zone = self._zone
+            frozen = True
+        else:
+            self.last_obs = {"why": "no_face", "drinking": False}
+            return self._update(False, seconds, now)
 
+        self.last_obs = _drink_metrics(hands_result, pose_result, zone, frozen)
+        drinking = bool(self.last_obs.get("drinking"))
+        return self._update(drinking, seconds, now)
+
+    def _update(self, drinking: bool, seconds: float, now: float) -> bool:
         if drinking:
             self.sustained += min(max(seconds, 0.0), 2.0)
+            self._positive_ts = now
         else:
             # Micro-dips between sips should not wipe accumulated progress;
-            # only sustained non-drinking decays it.
-            self.sustained = max(
-                0.0,
-                self.sustained - 0.7 * min(max(seconds, 0.0), 2.0),
+            # decay only starts after a quiet period, and then slowly.
+            idle = (
+                now - self._positive_ts if self._positive_ts is not None else 1e9
             )
+            if idle > DRINK_SIGNAL_GRACE_SECONDS:
+                self.sustained = max(
+                    0.0,
+                    self.sustained - DRINK_DECAY_RATE * min(max(seconds, 0.0), 2.0),
+                )
         if self.sustained >= DRINK_GESTURE_SECONDS:
             self.sustained = 0.0
             return True
