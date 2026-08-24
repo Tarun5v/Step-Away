@@ -32,6 +32,13 @@ __pycache__/
 *.py[cod]
 venv/
 
+# Virtual environments
+.venv/
+venv/
+
+# App data
+step_away_stats.json
+
 # Misc
 coverage/
 .cache/
