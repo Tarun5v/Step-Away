@@ -22,8 +22,8 @@ stretch when you have been focused for too long.
   screen appears, and it does not blink first: it stays up until gaze
   tracking confirms you actually looked away for 20 seconds. Keep staring
   and it will call you out.
-- **Automatic hydration tracking** - pose tracking watches for the
-  hand-to-mouth drinking gesture and logs a glass by itself (max one per
+- **Automatic hydration tracking** - hand tracking watches for a hand
+  raised toward your face and logs a glass by itself (max one per
   4 minutes); press `w` in the preview window to log manually.
 - **Water streaks** - hit your daily goal of 8 glasses to extend the
   streak; miss a day and it resets to zero. Progress and streak live in
@@ -88,7 +88,7 @@ Tune the behaviour by editing the constants at the top of `main.py`:
 | `FOCUS_REMINDER_MINUTES` | `50`    | Uninterrupted focus minutes per stretch nudge |
 | `EYE_RULE_MINUTES`       | `20`    | Minutes between 20-20-20 eye-rest screens     |
 | `DAILY_WATER_GOAL`       | `8`     | Glasses per day needed to extend the water streak |
-| `DRINK_GESTURE_SECONDS`  | `2.5`   | How long the hand-to-mouth pose must hold to count |
+| `DRINK_GESTURE_SECONDS`  | `1.5`   | How long a raised hand must hold to count |
 | `DRINK_DEDUP_SECONDS`    | `240`   | Minimum gap between auto-logged glasses |
 | `BREAK_AWAY_SECONDS`     | `60`    | Away-from-desk seconds before the break screen releases |
 | `INPUT_ACTIVITY_GRACE_SECONDS` | `5` | Mouse/keyboard idle gap still counted as presence |
