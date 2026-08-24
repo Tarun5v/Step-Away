@@ -12,8 +12,9 @@ stretch when you have been focused for too long.
   fades into a full-screen blurred break card, Screen Time style: "You've
   reached your focus limit. Stand up, stretch, breathe."
 - **20-20-20 eye rule** - every 20 minutes at the desk a blurred eye-rest
-  screen appears: look 6 metres away for 20 seconds. And yes, it can tell
-  when you are still watching - expect to be called out.
+  screen appears, and it does not blink first: it stays up until gaze
+  tracking confirms you actually looked away for 20 seconds. Keep staring
+  and it will call you out.
 - **Hydration tracking** - press `w` in the preview window to log each glass
   of water you drink; totals live in your daily stats.
 - **Break tracking** - stays away long enough (5+ minutes) and it counts as a
@@ -74,8 +75,8 @@ Tune the behaviour by editing the constants at the top of `main.py`:
 | `PREVIEW_TARGET_FPS`     | `60`    | Frame rate target for the `--preview` window  |
 | `FOCUS_REMINDER_MINUTES` | `50`    | Uninterrupted focus minutes per stretch nudge |
 | `EYE_RULE_MINUTES`       | `20`    | Minutes between 20-20-20 eye-rest screens     |
+| `EYE_REST_AWAY_SECONDS`  | `20`    | Away-look seconds before the eye screen releases |
 | `BREAK_OVERLAY_SECONDS`  | `30`    | Auto-dismiss time of the focus break screen   |
-| `EYE_REST_OVERLAY_SECONDS`| `20`   | How long the eye-rest screen stays up         |
 | `OVERLAY_COOLDOWN_SECONDS`| `60`   | Minimum quiet gap between wellness screens    |
 | `BREAK_THRESHOLD_SECONDS`| `300`   | Away-time that counts as a real break         |
 
