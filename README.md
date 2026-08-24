@@ -59,6 +59,7 @@ Tune the behaviour by editing the constants at the top of `main.py`:
 | `ABSENCE_LOCK_SECONDS`   | `10`    | Seconds away before the screen locks          |
 | `ABSENCE_WARNING_SECONDS`| `5`     | Seconds away before the lock warning shows    |
 | `LOCK_RETRY_SECONDS`     | `30`    | Delay between lock retries when locking fails |
+| `PREVIEW_TARGET_FPS`     | `60`    | Frame rate target for the `--preview` window  |
 | `FOCUS_REMINDER_MINUTES` | `50`    | Uninterrupted focus minutes per stretch nudge |
 | `BREAK_THRESHOLD_SECONDS`| `300`   | Away-time that counts as a real break         |
 
