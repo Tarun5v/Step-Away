@@ -27,7 +27,7 @@ PRESENCE_MIN_HITS = 2
 MIN_DETECTION_CONFIDENCE = 0.4
 DEMO_STRETCH_SECONDS = 40
 DEMO_EYE_REST_SECONDS = 10
-DEMO_OVERLAY_COOLDOWN_SECONDS = 5
+DEMO_OVERLAY_COOLDOWN_SECONDS = 15
 
 OVERLAY_CLOSE = "__overlay_close__"
 DRAIN_GRABS = 6
@@ -109,9 +109,9 @@ TERMINAL_APPS = {
 FOCUS_REMINDER_MINUTES = 50
 EYE_RULE_MINUTES = 20
 DAILY_WATER_GOAL = 8
-DRINK_GESTURE_SECONDS = 2.5
+DRINK_GESTURE_SECONDS = 2.0
 DRINK_DEDUP_SECONDS = 4 * 60
-WRIST_MOUTH_RATIO = 0.55
+WRIST_MOUTH_RATIO = 0.6
 BREAK_THRESHOLD_SECONDS = 300
 BREAK_AWAY_SECONDS = 60
 DEMO_BREAK_AWAY_SECONDS = 5
@@ -475,20 +475,23 @@ def _get_pose():
 
 
 def _is_drinking(landmarks) -> bool:
-    """True when a wrist is raised to mouth height near the head.
+    """True when a hand is raised into drinking position near the face.
 
-    Landmarks are normalised BlazePose points; distances are scaled by
-    shoulder width so the check is distance-invariant.
+    The wrist-to-mouth distance is scaled by shoulder width so it works
+    at any distance from the camera, and a bottle grip below the mouth
+    still lands inside the radius. A shoulder-line gate keeps resting
+    hands out.
     """
     mouth_x = (landmarks[9].x + landmarks[10].x) / 2
     mouth_y = (landmarks[9].y + landmarks[10].y) / 2
-    span = max(abs(landmarks[12].x - landmarks[11].x), 1e-4)
+    left_sh = landmarks[11]
+    right_sh = landmarks[12]
+    span = max(abs(right_sh.x - left_sh.x), 1e-4)
+    shoulder_line = max(left_sh.y, right_sh.y)
     for index in (15, 16):
         wrist = landmarks[index]
-        if (
-            wrist.y < mouth_y + 0.02
-            and abs(wrist.x - mouth_x) < WRIST_MOUTH_RATIO * span
-        ):
+        distance = ((wrist.x - mouth_x) ** 2 + (wrist.y - mouth_y) ** 2) ** 0.5
+        if distance < WRIST_MOUTH_RATIO * span and wrist.y < shoulder_line + 0.05:
             return True
     return False
 
@@ -520,11 +523,16 @@ class DrinkDetector:
         )
         if landmarks is not None and _is_drinking(landmarks):
             self.sustained += min(max(seconds, 0.0), 2.0)
-            if self.sustained >= DRINK_GESTURE_SECONDS:
-                self.sustained = 0.0
-                return True
         else:
+            # Micro-dips between sips should not wipe accumulated progress;
+            # only sustained non-drinking decays it.
+            self.sustained = max(
+                0.0,
+                self.sustained - 0.7 * min(max(seconds, 0.0), 2.0),
+            )
+        if self.sustained >= DRINK_GESTURE_SECONDS:
             self.sustained = 0.0
+            return True
         return False
 
 
@@ -1139,7 +1147,18 @@ class StepAwayApp:
             return
         self.last_pose_call = now
         frame = self._eye_rest_frame_provider()
-        if frame is None or not self.drink_detector.consider(frame, gap):
+        if frame is None:
+            return
+        drinking_now = self.drink_detector.consider(frame, gap)
+        if self.debug and (
+            drinking_now or self.drink_detector.sustained > 0.1
+        ):
+            stamp = time.strftime("%H:%M:%S")
+            print(
+                f"[{stamp}] drink pose {self.drink_detector.sustained:.1f}s"
+                f"{' - LOGGED' if drinking_now else ''}"
+            )
+        if not drinking_now:
             return
         if now - self.last_auto_water_ts < DRINK_DEDUP_SECONDS:
             return
