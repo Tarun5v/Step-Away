@@ -23,6 +23,9 @@ CHECK_INTERVAL_SECONDS = 3
 PRESENCE_WINDOW_SIZE = 5
 PRESENCE_MIN_HITS = 2
 MIN_DETECTION_CONFIDENCE = 0.4
+DEMO_STRETCH_SECONDS = 40
+DEMO_EYE_REST_SECONDS = 10
+DEMO_HYDRATION_SECONDS = 25
 DRAIN_GRABS = 6
 PREVIEW_TARGET_FPS = 60
 FPS_SMOOTHING = 0.9
@@ -446,7 +449,7 @@ def run_doctor() -> int:
 class StepAwayApp:
     """Ties presence monitoring into security and wellness behaviours."""
 
-    def __init__(self, debug: bool = False, show_preview: bool = False):
+    def __init__(self, debug: bool = False, show_preview: bool = False, demo: bool = False):
         self.monitor = PresenceMonitor(debug=debug)
         self.show_preview = show_preview
         self.presence_announced = False
@@ -461,6 +464,15 @@ class StepAwayApp:
         self.next_lock_attempt = 0.0
         self.last_tick = time.time()
         self.last_save = time.time()
+
+        if demo:
+            self.stretch_interval = DEMO_STRETCH_SECONDS
+            self.eye_rest_interval = DEMO_EYE_REST_SECONDS
+            self.hydrate_interval = DEMO_HYDRATION_SECONDS
+        else:
+            self.stretch_interval = FOCUS_REMINDER_MINUTES * 60
+            self.eye_rest_interval = EYE_RULE_MINUTES * 60
+            self.hydrate_interval = HYDRATION_INTERVAL_MINUTES * 60
 
     def _update_security(self, now: float) -> None:
         if self.monitor.face_present:
@@ -498,7 +510,7 @@ class StepAwayApp:
 
             if self.focus_start is None:
                 self.focus_start = now
-            elif now - self.focus_start >= FOCUS_REMINDER_MINUTES * 60:
+            elif now - self.focus_start >= self.stretch_interval:
                 send_stretch_notification()
                 self.stats.record_reminder()
                 stamp = time.strftime("%H:%M:%S")
@@ -508,7 +520,7 @@ class StepAwayApp:
 
             if self.eye_rest_start is None:
                 self.eye_rest_start = now
-            elif now - self.eye_rest_start >= EYE_RULE_MINUTES * 60:
+            elif now - self.eye_rest_start >= self.eye_rest_interval:
                 send_stretch_notification(
                     message="20-20-20: look at something 6 metres away for 20 seconds."
                 )
@@ -519,7 +531,7 @@ class StepAwayApp:
 
             if self.hydrate_start is None:
                 self.hydrate_start = now
-            elif now - self.hydrate_start >= HYDRATION_INTERVAL_MINUTES * 60:
+            elif now - self.hydrate_start >= self.hydrate_interval:
                 send_stretch_notification(message="Time to sip some water - stay hydrated!")
                 stamp = time.strftime("%H:%M:%S")
                 print(f"[{stamp}] Hydration nudge sent (press w in preview to log a glass).")
@@ -592,6 +604,12 @@ class StepAwayApp:
 
     def run(self) -> int:
         print("Step-Away is starting up. Press Ctrl+C to quit.")
+        if self.stretch_interval == DEMO_STRETCH_SECONDS:
+            print(
+                f"Demo mode: stretch every {DEMO_STRETCH_SECONDS}s, "
+                f"eye rest every {DEMO_EYE_REST_SECONDS}s, "
+                f"water every {DEMO_HYDRATION_SECONDS}s."
+            )
         print(f"Streak so far: {self.stats.current_streak()} day(s).")
         if not self.stats.setup_acknowledged:
             print(FIRST_RUN_CHECKLIST)
@@ -715,7 +733,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--doctor", action="store_true", help="verify permissions and dependencies"
     )
+    parser.add_argument(
+        "--demo", action="store_true", help="shrink wellness timers to seconds for testing"
+    )
     args = parser.parse_args()
     if args.doctor:
         sys.exit(run_doctor())
-    sys.exit(StepAwayApp(debug=args.debug, show_preview=args.preview).run())
+    sys.exit(StepAwayApp(debug=args.debug, show_preview=args.preview, demo=args.demo).run())
