@@ -271,25 +271,17 @@ def send_stretch_notification(message: str = None) -> None:
         subprocess.run(["osascript", "-e", script], capture_output=True)
 
 
-def show_break_overlay(title: str, subtitle: str, duration_seconds: float) -> None:
-    """Take over the screen with a blurred, Apple-style break card.
+_overlay_ui_cache = {}
 
-    Falls back to a regular notification when the native UI stack is
-    unavailable. Blocks until the user clicks/presses a key or the
-    duration elapses.
-    """
-    try:
-        import AppKit
-        import objc
-        from Foundation import NSObject, NSMakeRect
 
-        NSMakeRect  # keep linters honest about the conditional import
-    except Exception:
-        send_stretch_notification(message=f"{title}. {subtitle}")
-        return
+def _load_overlay_ui():
+    """Define the native overlay classes once; pyobjc forbids re-registering."""
+    if "ui" in _overlay_ui_cache:
+        return _overlay_ui_cache["ui"]
 
-    app = AppKit.NSApplication.sharedApplication()
-    screen = AppKit.NSScreen.mainScreen().frame()
+    import AppKit
+    import objc
+    from Foundation import NSObject
 
     class OverlayWindow(AppKit.NSWindow):
         def canBecomeKeyWindow(self):
@@ -308,6 +300,30 @@ def show_break_overlay(title: str, subtitle: str, duration_seconds: float) -> No
     class Coordinator(NSObject):
         def tick_(self, timer):
             AppKit.NSApplication.sharedApplication().stopModal()
+
+    _overlay_ui_cache["ui"] = (OverlayWindow, Coordinator)
+    return _overlay_ui_cache["ui"]
+
+
+def show_break_overlay(title: str, subtitle: str, duration_seconds: float) -> None:
+    """Take over the screen with a blurred, Apple-style break card.
+
+    Falls back to a regular notification when the native UI stack is
+    unavailable. Blocks until the user clicks/presses a key or the
+    duration elapses.
+    """
+    try:
+        import AppKit
+        from Foundation import NSMakeRect, NSTimer, NSRunLoop
+
+        OverlayWindow, Coordinator = _load_overlay_ui()
+        NSMakeRect  # keep linters honest about the conditional import
+    except Exception:
+        send_stretch_notification(message=f"{title}. {subtitle}")
+        return
+
+    app = AppKit.NSApplication.sharedApplication()
+    screen = AppKit.NSScreen.mainScreen().frame()
 
     window = OverlayWindow.alloc().initWithContentRect_styleMask_backing_defer_(
         NSMakeRect(0, 0, screen.size.width, screen.size.height),
