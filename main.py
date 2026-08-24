@@ -73,6 +73,14 @@ EYE_RULE_MINUTES = 20
 BREAK_THRESHOLD_SECONDS = 300
 BREAK_OVERLAY_SECONDS = 30
 EYE_REST_OVERLAY_SECONDS = 20
+EYE_REST_POLL_SECONDS = 1.0
+EYE_REST_NAG_STEP_SECONDS = 4.0
+EYE_REST_NAG_MESSAGES = [
+    "I can still see you watching\u2026",
+    "The screen is fine without you. Look away.",
+    "Your eyes are begging for this break. Take it.",
+    "Staring contest accepted. You will lose.",
+]
 DAY_DEFAULTS = {
     "focus_seconds": 0,
     "reminders": 0,
@@ -107,10 +115,17 @@ class PresenceMonitor(threading.Thread):
         self.error = None
         self._prev_motion_frame = None
         self._snapshot_index = 0
+        self._latest_frame = None
+        self._frame_lock = threading.Lock()
 
     @property
     def face_present(self) -> bool:
         return self.vote.present
+
+    @property
+    def latest_frame(self):
+        with self._frame_lock:
+            return self._latest_frame
 
     def stop(self) -> None:
         self._running = False
@@ -179,6 +194,8 @@ class PresenceMonitor(threading.Thread):
                 raw_present, boxes = self._detect_face(detector, frame)
                 motion = self._motion_score(frame)
                 self.vote.record(raw_present)
+                with self._frame_lock:
+                    self._latest_frame = frame.copy()
                 hits, total = self.vote.tally
 
                 if self.debug:
@@ -257,6 +274,93 @@ def lock_screen() -> bool:
     return True
 
 
+_face_mesh_lock = threading.Lock()
+_face_mesh = None
+
+
+def _get_face_mesh():
+    """Lazily create the shared FaceMesh used for eye-rest supervision."""
+    global _face_mesh
+    with _face_mesh_lock:
+        if _face_mesh is None:
+            import mediapipe as mp
+
+            _face_mesh = mp.solutions.face_mesh.FaceMesh(
+                max_num_faces=1,
+                min_detection_confidence=MIN_DETECTION_CONFIDENCE,
+                min_tracking_confidence=0.5,
+            )
+    return _face_mesh
+
+
+def gaze_on_screen(frame) -> bool:
+    """True when a roughly frontal face with open eyes fills the frame.
+
+    Used during the eye-rest screen to notice the user still watching.
+    Returns False when no face, a turned-away face or closed eyes are seen.
+    """
+    import cv2 as _cv2
+
+    detector_mesh = _get_face_mesh()
+    image = _cv2.cvtColor(frame, _cv2.COLOR_BGR2RGB)
+    result = detector_mesh.process(image)
+    if not result.multi_face_landmarks:
+        return False
+
+    landmarks = result.multi_face_landmarks[0].landmark
+    height, width = frame.shape[:2]
+
+    def pixel(index):
+        point = landmarks[index]
+        return point.x * width, point.y * height
+
+    nose_x, _ = pixel(1)
+    left_x, _ = pixel(234)
+    right_x, _ = pixel(454)
+    face_width = max(right_x - left_x, 1e-6)
+    centre_offset = abs((nose_x - left_x) / face_width - 0.5)
+    if centre_offset > 0.18:
+
+        return False
+
+    def eye_ratio(top, bottom, inner, outer):
+        vertical = abs(pixel(top)[1] - pixel(bottom)[1])
+        horizontal = max(abs(pixel(inner)[0] - pixel(outer)[0]), 1e-6)
+        return vertical / horizontal
+
+    left_eye = eye_ratio(159, 145, 33, 133)
+    right_eye = eye_ratio(386, 374, 362, 263)
+    return (left_eye + right_eye) / 2 > 0.15
+
+
+class GazeNagger:
+    """Escalating call-outs while the user keeps staring during eye rest."""
+
+    def __init__(self, frame_provider, step_seconds: float = EYE_REST_NAG_STEP_SECONDS):
+        self.frame_provider = frame_provider
+        self.step_seconds = step_seconds
+        self.watch_seconds = 0.0
+        self.level = 0
+
+    def next_message(self):
+        frame = None
+        try:
+            frame = self.frame_provider()
+        except Exception:
+            frame = None
+
+        if frame is not None and gaze_on_screen(frame):
+            self.watch_seconds += EYE_REST_POLL_SECONDS
+            reached = int(self.watch_seconds // self.step_seconds)
+            if reached > self.level:
+                self.level = reached
+                index = min(self.level - 1, len(EYE_REST_NAG_MESSAGES) - 1)
+                return EYE_REST_NAG_MESSAGES[index]
+        else:
+            self.watch_seconds = max(0.0, self.watch_seconds - EYE_REST_POLL_SECONDS)
+        return None
+
+
 def send_stretch_notification(message: str = None) -> None:
     """Post a desktop reminder to stand up and stretch."""
     title = "Step-Away"
@@ -301,16 +405,30 @@ def _load_overlay_ui():
         def tick_(self, timer):
             AppKit.NSApplication.sharedApplication().stopModal()
 
+        def refreshTitle_(self, timer):
+            try:
+                replacement = self.on_title_refresh()
+            except Exception:
+                return
+            if replacement:
+                self.title_field.setStringValue_(replacement)
+
     _overlay_ui_cache["ui"] = (OverlayWindow, Coordinator)
     return _overlay_ui_cache["ui"]
 
 
-def show_break_overlay(title: str, subtitle: str, duration_seconds: float) -> None:
+def show_break_overlay(
+    title: str,
+    subtitle: str,
+    duration_seconds: float,
+    on_title_refresh=None,
+) -> None:
     """Take over the screen with a blurred, Apple-style break card.
 
     Falls back to a regular notification when the native UI stack is
     unavailable. Blocks until the user clicks/presses a key or the
-    duration elapses.
+    duration elapses. When on_title_refresh is provided it is polled
+    periodically and may return replacement headline text.
     """
     try:
         import AppKit
@@ -364,7 +482,8 @@ def show_break_overlay(title: str, subtitle: str, duration_seconds: float) -> No
 
     content = window.contentView()
     content.addSubview_(blur)
-    content.addSubview_(centered_label(0.55, 90, title, 40, 1.0))
+    title_field = centered_label(0.55, 90, title, 40, 1.0)
+    content.addSubview_(title_field)
     if subtitle:
         content.addSubview_(centered_label(0.47, 40, subtitle, 24, 0.85))
     content.addSubview_(centered_label(0.10, 30, "Press any key or click to continue", 15, 0.55))
@@ -372,21 +491,32 @@ def show_break_overlay(title: str, subtitle: str, duration_seconds: float) -> No
     coordinator = Coordinator.alloc().init()
     from Foundation import NSTimer, NSRunLoop
 
-    timer = NSTimer.timerWithTimeInterval_target_selector_userInfo_repeats_(
-        duration_seconds, coordinator, "tick:", None, False
-    )
-    for mode in (
-        AppKit.NSModalPanelRunLoopMode,
-        AppKit.NSDefaultRunLoopMode,
-    ):
-        NSRunLoop.currentRunLoop().addTimer_forMode_(timer, mode)
+    def schedule(interval, repeats, selector):
+        poll_timer = NSTimer.timerWithTimeInterval_target_selector_userInfo_repeats_(
+            interval, coordinator, selector, None, repeats
+        )
+        for mode in (
+            AppKit.NSModalPanelRunLoopMode,
+            AppKit.NSDefaultRunLoopMode,
+        ):
+            NSRunLoop.currentRunLoop().addTimer_forMode_(poll_timer, mode)
+        return poll_timer
+
+    close_timer = schedule(duration_seconds, False, "tick:")
+    poll_timer = None
+    if on_title_refresh is not None:
+        coordinator.on_title_refresh = on_title_refresh
+        coordinator.title_field = title_field
+        poll_timer = schedule(EYE_REST_POLL_SECONDS, True, "refreshTitle:")
 
     window.makeKeyAndOrderFront_(None)
     app.activateIgnoringOtherApps_(True)
     try:
         app.runModalForWindow_(window)
     finally:
-        timer.invalidate()
+        close_timer.invalidate()
+        if poll_timer is not None:
+            poll_timer.invalidate()
         window.orderOut_(None)
 
 
@@ -571,6 +701,7 @@ class StepAwayApp:
     def __init__(self, debug: bool = False, show_preview: bool = False, demo: bool = False):
         self.monitor = PresenceMonitor(debug=debug)
         self.show_preview = show_preview
+        self._preview_capture = None
         self.presence_announced = False
         self.stats = StatsStore()
         self.absent_since = None
@@ -647,10 +778,12 @@ class StepAwayApp:
                 self.stats.record_eye_rest()
                 stamp = time.strftime("%H:%M:%S")
                 print(f"[{stamp}] 20-20-20 - showing eye-rest screen.")
+                nagger = GazeNagger(self._eye_rest_frame_provider())
                 show_break_overlay(
-                    "Look 6 metres away for 20 seconds.",
-                    "",
+                    "20-20-20",
+                    "Look at something 6 metres away for 20 seconds.",
                     self.eye_overlay_duration,
+                    on_title_refresh=nagger.next_message,
                 )
                 self.eye_rest_start = time.time()
 
@@ -719,6 +852,21 @@ class StepAwayApp:
         self._update_wellness(now, delta)
         self._reset_focus_session()
 
+    def _eye_rest_frame_provider(self):
+        if self.show_preview:
+            capture = self._preview_capture
+
+            def from_preview():
+                grabbed, frame = capture.read()
+                return frame if grabbed else None
+
+            return from_preview
+
+        def from_monitor():
+            return self.monitor.latest_frame
+
+        return from_monitor
+
     def run(self) -> int:
         print("Step-Away is starting up. Press Ctrl+C to quit.")
         if self.stretch_interval == DEMO_STRETCH_SECONDS:
@@ -781,6 +929,7 @@ class StepAwayApp:
         except RuntimeError as error:
             print(f"Stopped: {error}")
             return 1
+        self._preview_capture = capture
 
         frame_interval = 1.0 / PREVIEW_TARGET_FPS
         fps = 0.0
