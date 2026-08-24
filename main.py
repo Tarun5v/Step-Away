@@ -27,6 +27,7 @@ DRAIN_GRABS = 6
 DEBUG_FRAME_DIR = ".debug_frames"
 DEBUG_SNAPSHOT_LIMIT = 40
 MOTION_RESIZE_WIDTH = 160
+PREVIEW_WINDOW_TITLE = "Step-Away camera"
 ABSENCE_LOCK_SECONDS = 10
 ABSENCE_WARNING_SECONDS = 5
 LOCK_COMMAND_TIMEOUT_SECONDS = 5
@@ -50,11 +51,17 @@ class PresenceMonitor(threading.Thread):
         self.error = None
         self._prev_motion_frame = None
         self._snapshot_index = 0
+        self._latest_view = None
 
     @property
     def face_present(self) -> bool:
         with self._state_lock:
             return sum(self._recent_hits) >= PRESENCE_MIN_HITS
+
+    @property
+    def latest_view(self):
+        with self._state_lock:
+            return self._latest_view
 
     def stop(self) -> None:
         self._running = False
@@ -69,11 +76,25 @@ class PresenceMonitor(threading.Thread):
             )
         return capture
 
-    def _detect_face(self, detector, frame) -> bool:
+    def _detect_face(self, detector, frame):
+        """Return (present, pixel-space boxes) for faces in the frame."""
         image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         image.flags.writeable = False
         result = detector.process(image)
-        return bool(result.detections)
+        detections = result.detections or []
+        height, width = frame.shape[:2]
+        boxes = []
+        for detection in detections:
+            box = detection.location_data.relative_bounding_box
+            boxes.append(
+                (
+                    int(box.xmin * width),
+                    int(box.ymin * height),
+                    int(box.width * width),
+                    int(box.height * height),
+                )
+            )
+        return bool(detections), boxes
 
     def run(self) -> None:
         try:
@@ -113,10 +134,11 @@ class PresenceMonitor(threading.Thread):
                     time.sleep(CHECK_INTERVAL_SECONDS)
                     continue
 
-                raw_present = self._detect_face(detector, frame)
+                raw_present, boxes = self._detect_face(detector, frame)
                 motion = self._motion_score(frame)
                 with self._state_lock:
                     self._recent_hits.append(raw_present)
+                    self._latest_view = (frame.copy(), boxes)
                     hits = sum(self._recent_hits)
 
                 if self.debug:
@@ -287,8 +309,9 @@ class StatsStore:
 class StepAwayApp:
     """Ties presence monitoring into security and wellness behaviours."""
 
-    def __init__(self, debug: bool = False):
+    def __init__(self, debug: bool = False, show_preview: bool = False):
         self.monitor = PresenceMonitor(debug=debug)
+        self.show_preview = show_preview
         self.presence_announced = False
         self.stats = StatsStore()
         self.absent_since = None
@@ -360,6 +383,26 @@ class StepAwayApp:
             self.focus_start = None
             self.break_counted = False
 
+    def _draw_preview(self) -> None:
+        view = self.monitor.latest_view
+        if view is None:
+            return
+        frame, boxes = view
+        for x, y, w, h in boxes:
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (80, 200, 80), 2)
+        state = "watching you" if self.presence_announced else "desk empty"
+        cv2.putText(
+            frame,
+            f"Step-Away: {state}",
+            (10, 26),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (80, 200, 80),
+            2,
+        )
+        cv2.imshow(PREVIEW_WINDOW_TITLE, frame)
+        cv2.waitKey(1)
+
     def run(self) -> int:
         print("Step-Away is starting up. Press Ctrl+C to quit.")
         print(f"Streak so far: {self.stats.current_streak()} day(s).")
@@ -380,6 +423,9 @@ class StepAwayApp:
                     print(f"[{stamp}] You {state} the desk.")
                     self.presence_announced = present
 
+                if self.show_preview:
+                    self._draw_preview()
+
                 self._update_security(now)
                 self._update_wellness(now, delta)
                 self._reset_focus_session()
@@ -394,6 +440,9 @@ class StepAwayApp:
 
         self.monitor.stop()
         self.monitor.join(timeout=CHECK_INTERVAL_SECONDS * 2)
+
+        if self.show_preview:
+            cv2.destroyAllWindows()
 
         if self.monitor.error:
             print(f"Stopped: {self.monitor.error}")
@@ -414,5 +463,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--debug", action="store_true", help="print every webcam check result"
     )
+    parser.add_argument(
+        "--preview", action="store_true", help="show a live camera window with face boxes"
+    )
     args = parser.parse_args()
-    sys.exit(StepAwayApp(debug=args.debug).run())
+    sys.exit(StepAwayApp(debug=args.debug, show_preview=args.preview).run())
