@@ -115,8 +115,9 @@ TERMINAL_APPS = {
 FOCUS_REMINDER_MINUTES = 50
 EYE_RULE_MINUTES = 20
 DAILY_WATER_GOAL = 8
-DRINK_GESTURE_SECONDS = 1.5
+DRINK_GESTURE_SECONDS = 2
 DRINK_DEDUP_SECONDS = 4 * 60
+HAND_SCORE_MIN = 0.5
 BREAK_THRESHOLD_SECONDS = 300
 BREAK_AWAY_SECONDS = 60
 DEMO_BREAK_AWAY_SECONDS = 5
@@ -475,23 +476,79 @@ def _get_hands():
                     static_image_mode=False,
                     max_num_hands=1,
                     model_complexity=0,
-                    min_detection_confidence=0.5,
+                    min_detection_confidence=0.6,
                 )
     return _hands
 
 
-class DrinkDetector:
-    """Detects drinking as a raised hand near the face.
+def _drink_metrics(hands_result, face_result) -> dict:
+    """Judge whether a detected hand is really a drink at the mouth.
 
-    Uses MediaPipe Hands (purpose-built for hands, reliable even beside a
-    face) rather than full-body pose, whose wrists are unreliable in tight
-    head-and-shoulders webcam framing. A hand whose centre sits in the
-    upper part of the frame counts as the drinking gesture; desk-level
-    typing hands never do. Progress accumulates over DRINK_GESTURE_SECONDS
-    and decays gently between sips instead of resetting.
+    MediaPipe Hands happily fires on faces, shoulders and clothing when
+    the hands are empty, so "a hand exists" alone counts phantoms. Every
+    check here is physical: the detection must be confident, sit at or
+    below nose level, reach past the chin the way a cup-holding hand
+    does, keep its fingertips above the wrist, and stay within reach of
+    the mouth measured against face size.
     """
+    hand_lists = getattr(hands_result, "multi_hand_landmarks", None)
+    if not hand_lists:
+        return {"hand": False}
 
-    HAND_RAISE_ZONE = 0.55
+    score = 0.0
+    handedness = getattr(hands_result, "multi_handedness", None)
+    if handedness:
+        score = handedness[0].classification[0].score
+
+    face_lists = getattr(face_result, "multi_face_landmarks", None)
+    if not face_lists:
+        return {"hand": True, "score": round(score, 2), "drinking": False,
+                "why": "no_face"}
+
+    face = face_lists[0].landmark
+    mouth_x = (face[61].x + face[291].x) / 2
+    mouth_y = (face[61].y + face[291].y) / 2
+    nose_y = face[1].y
+    chin_y = face[152].y
+    span = abs(face[454].x - face[234].x)
+    height = max(abs(chin_y - face[10].y), 1e-4)
+
+    points = hand_lists[0].landmark
+    xs = [point.x for point in points]
+    ys = [point.y for point in points]
+    centre_x = sum(xs) / len(xs)
+    centre_y = sum(ys) / len(ys)
+    bottom = max(ys)
+    tips_y = sum(points[index].y for index in (4, 8, 12, 16, 20)) / 5
+    wrist_y = points[0].y
+
+    checks = {
+        "score": score >= HAND_SCORE_MIN,
+        "level": centre_y > nose_y - 0.05 * height,
+        "past_chin": bottom > chin_y - 0.1 * height,
+        "orient": tips_y < wrist_y,
+        "near_mouth": (
+            abs(centre_x - mouth_x) < 0.9 * span
+            and mouth_y < centre_y < chin_y + 0.6 * height
+        ),
+    }
+    return {
+        "hand": True,
+        "score": round(score, 2),
+        "y": round(centre_y, 2),
+        **checks,
+        "drinking": all(checks.values()),
+    }
+
+
+class DrinkDetector:
+    """Detects drinking as a verified hand-at-the-mouth gesture.
+
+    Hand detections are cross-checked against face landmarks so phantom
+    detections on faces or desks never count. The gesture must hold for
+    DRINK_GESTURE_SECONDS before consider() fires once and re-arms;
+    progress decays gently between sips instead of resetting.
+    """
 
     def __init__(self):
         self.sustained = 0.0
@@ -501,25 +558,17 @@ class DrinkDetector:
         import cv2 as _cv2
 
         try:
-            hands = _get_hands()
             image = _cv2.cvtColor(frame, _cv2.COLOR_BGR2RGB)
             with QuietStderr():
-                result = hands.process(image)
+                face_result = _get_face_mesh().process(image)
+                hands_result = _get_hands().process(image)
         except Exception as error:
             self.sustained = 0.0
             self.last_obs = {"error": f"{type(error).__name__}: {error}"[:140]}
             return False
 
-        hand_lists = result.multi_hand_landmarks
-        if not hand_lists:
-            self.last_obs = {"hand": False}
-            drinking = False
-        else:
-            points = hand_lists[0].landmark
-            centre_y = sum(point.y for point in points) / len(points)
-            raised = centre_y < self.HAND_RAISE_ZONE
-            self.last_obs = {"hand": True, "y": round(centre_y, 2), "raised": raised}
-            drinking = raised
+        self.last_obs = _drink_metrics(hands_result, face_result)
+        drinking = bool(self.last_obs.get("drinking"))
 
         if drinking:
             self.sustained += min(max(seconds, 0.0), 2.0)
