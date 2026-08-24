@@ -280,7 +280,8 @@ def show_break_overlay(title: str, subtitle: str, duration_seconds: float) -> No
     """
     try:
         import AppKit
-        from Foundation import NSObject, NSMakeRect  # noqa: F401
+        import objc
+        from Foundation import NSObject, NSMakeRect
 
         NSMakeRect  # keep linters honest about the conditional import
     except Exception:
@@ -291,6 +292,9 @@ def show_break_overlay(title: str, subtitle: str, duration_seconds: float) -> No
     screen = AppKit.NSScreen.mainScreen().frame()
 
     class OverlayWindow(AppKit.NSWindow):
+        def canBecomeKeyWindow(self):
+            return True
+
         def sendEvent_(self, event):
             if event.type() in (
                 AppKit.NSKeyDown,
@@ -299,7 +303,7 @@ def show_break_overlay(title: str, subtitle: str, duration_seconds: float) -> No
             ):
                 AppKit.NSApplication.sharedApplication().stopModal()
                 return
-            super().sendEvent_(event)
+            return objc.super(OverlayWindow, self).sendEvent_(event)
 
     class Coordinator(NSObject):
         def tick_(self, timer):
@@ -349,12 +353,15 @@ def show_break_overlay(title: str, subtitle: str, duration_seconds: float) -> No
     content.addSubview_(centered_label(0.10, 30, "Press any key or click to continue", 15, 0.55))
 
     coordinator = Coordinator.alloc().init()
-    from Foundation import NSTimer, NSRunLoop, NSModalPanelRunLoopMode, NSDefaultRunLoopMode
+    from Foundation import NSTimer, NSRunLoop
 
     timer = NSTimer.timerWithTimeInterval_target_selector_userInfo_repeats_(
         duration_seconds, coordinator, "tick:", None, False
     )
-    for mode in (NSModalPanelRunLoopMode, NSDefaultRunLoopMode):
+    for mode in (
+        AppKit.NSModalPanelRunLoopMode,
+        AppKit.NSDefaultRunLoopMode,
+    ):
         NSRunLoop.currentRunLoop().addTimer_forMode_(timer, mode)
 
     window.makeKeyAndOrderFront_(None)
