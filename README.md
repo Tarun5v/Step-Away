@@ -4,6 +4,18 @@ A webcam-powered presence guard for your Mac. Step-Away watches whether you are
 at your desk, locks your screen the moment you step away, and reminds you to
 stretch when you have been focused for too long.
 
+## Download & Run (no coding needed)
+
+1. Grab `Step-Away-macOS.zip` from the [latest release](https://github.com/Tarun5v/Step-Away/releases/latest).
+2. Unzip it and drag **Step Away** into your Applications folder.
+3. The first time you open it, macOS may warn that the app is from an unknown
+   developer: right-click the app and choose **Open**, then confirm. This only
+   happens once.
+4. Allow camera access when macOS asks - that is what powers the presence
+   detection. Everything stays on your Mac; no video ever leaves it.
+
+Requires an Apple Silicon Mac (M1/M2/M3/M4).
+
 ## Features
 
 - **Auto-lock security** - after a 60-second warm-up the guard arms: 5
