@@ -18,6 +18,8 @@ import mediapipe as mp
 
 CAMERA_INDEX = 0
 CHECK_INTERVAL_SECONDS = 3
+MISSES_TO_MARK_ABSENT = 2
+HITS_TO_MARK_PRESENT = 1
 ABSENCE_LOCK_SECONDS = 10
 ABSENCE_WARNING_SECONDS = 5
 LOCK_COMMAND_TIMEOUT_SECONDS = 5
@@ -36,6 +38,8 @@ class PresenceMonitor(threading.Thread):
         self.camera_index = camera_index
         self._state_lock = threading.Lock()
         self._face_present = False
+        self._pending_present = False
+        self._pending_count = 0
         self._running = True
         self.error = None
 
@@ -89,10 +93,10 @@ class PresenceMonitor(threading.Thread):
                     continue
 
                 failed_reads = 0
-                present = self._detect_face(detector, frame)
-                changed = present != self.face_present
+                raw_present = self._detect_face(detector, frame)
                 with self._state_lock:
-                    self._face_present = present
+                    changed = self._apply_debounce(raw_present)
+                    present = self._face_present
 
                 if changed:
                     state = "arrived" if present else "left"
@@ -102,6 +106,26 @@ class PresenceMonitor(threading.Thread):
                 time.sleep(CHECK_INTERVAL_SECONDS)
 
         capture.release()
+
+    def _apply_debounce(self, raw_present: bool) -> bool:
+        """Flip the stable state only after repeated identical readings."""
+        if raw_present == self._face_present:
+            self._pending_count = 0
+            return False
+
+        needed = HITS_TO_MARK_PRESENT if raw_present else MISSES_TO_MARK_ABSENT
+        if self._pending_present == raw_present:
+            self._pending_count += 1
+        else:
+            self._pending_present = raw_present
+            self._pending_count = 1
+
+        if self._pending_count < needed:
+            return False
+
+        self._face_present = raw_present
+        self._pending_count = 0
+        return True
 
 
 def lock_screen() -> bool:
@@ -124,9 +148,12 @@ def lock_screen() -> bool:
         print("The screen lock command timed out.")
         return False
     if result.returncode != 0:
+        detail = (result.stderr or "").strip().splitlines()
+        reason = f" ({detail[0]})" if detail else ""
         print(
-            "Could not lock the screen automatically. Grant Accessibility "
-            "permission to your terminal app in System Settings > Privacy & Security."
+            "Could not lock the screen automatically"
+            f"{reason}. Grant Accessibility permission to your terminal app in "
+            "System Settings > Privacy & Security > Accessibility."
         )
         return False
     return True
