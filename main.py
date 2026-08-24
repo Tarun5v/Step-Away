@@ -118,6 +118,10 @@ DAILY_WATER_GOAL = 8
 DRINK_GESTURE_SECONDS = 1.5
 DRINK_DEDUP_SECONDS = 4 * 60
 HAND_SCORE_MIN = 0.5
+POSE_MIN_VISIBILITY = 0.3
+WRIST_MOUTH_RATIO = 0.6
+MIN_DRINK_RADIUS = 0.18
+POSE_SHOULDER_GATE = 0.12
 BREAK_THRESHOLD_SECONDS = 300
 BREAK_AWAY_SECONDS = 60
 DEMO_BREAK_AWAY_SECONDS = 5
@@ -462,6 +466,8 @@ def face_in_frame(frame) -> bool:
 
 _hands_lock = threading.Lock()
 _hands = None
+_pose_lock = threading.Lock()
+_pose = None
 
 
 def _get_hands():
@@ -481,67 +487,127 @@ def _get_hands():
     return _hands
 
 
-def _drink_metrics(hands_result, face_result) -> dict:
-    """Judge whether a detected hand is a drink at the mouth.
+def _get_pose():
+    """Lazily create the shared lightweight pose model for drink detection."""
+    global _pose
+    with _pose_lock:
+        if _pose is None:
+            import mediapipe as mp
 
-    Following HydroVisor's approach, the hand's posture is irrelevant -
-    fingers curl around cups and wrists rotate, so judging geometry makes
-    natural drinking unrecognisable. Only space matters: a confident
-    detection whose centre sits in the mouth zone (below the nose, within
-    about one face-width of the mouth, down to just under chin level)
-    counts. That keeps face-phantoms above the nose and desk hands below
-    the zone out, while any natural grip inside it passes.
+            with QuietStderr():
+                _pose = mp.solutions.pose.Pose(
+                    static_image_mode=False,
+                    model_complexity=0,
+                    min_detection_confidence=0.5,
+                )
+    return _pose
+
+
+def _lip_zone(face):
+    """Return a generous rectangle around the lips, scaled by face size.
+
+    Ported from HydroVisor's overlapDetection.ts: the lip landmarks form
+    a tiny box that drinking vessels must touch. The padding lets cups,
+    bottles and mugs of any size count while staying anchored to the
+    mouth rather than the whole face.
     """
-    hand_lists = getattr(hands_result, "multi_hand_landmarks", None)
-    if not hand_lists:
-        return {"hand": False}
+    points = [face[index] for index in (13, 14, 15, 16, 0, 17)]
+    span = abs(face[454].x - face[234].x)
+    height = abs(face[152].y - face[10].y)
+    lip_x = sum(point.x for point in points) / len(points)
+    lip_y = sum(point.y for point in points) / len(points)
+    return {
+        "x": lip_x,
+        "top": lip_y - 0.45 * height,
+        "bottom": lip_y + 0.45 * height,
+        "left": lip_x - 0.8 * span,
+        "right": lip_x + 0.8 * span,
+        "centre": (lip_x, lip_y),
+    }
 
+
+def _drink_metrics(hands_result, pose_result, face_result) -> dict:
+    """Judge drinking HydroVisor-style: does something cup-sized touch the lips?
+
+    A hand wrapped around a mug stops looking like a hand, so no single
+    tracker is trusted alone. Two independent signals vote, either one is
+    enough, and both are anchored to the same lip rectangle:
+
+    - hands: any confident detection whose bounding box overlaps the lip
+      zone, regardless of finger posture (the vessel may hide the palm).
+    - pose: either wrist inside the zone's reach radius, gated by
+      visibility and an above-shoulder check to reject desk hands.
+
+    Phantom detections far from the lips satisfy neither.
+    """
+    face_lists = getattr(face_result, "multi_face_landmarks", None)
+    if not face_lists:
+        return {"why": "no_face", "drinking": False}
+    zone = _lip_zone(face_lists[0].landmark)
+
+    obs = {}
+
+    hand_lists = getattr(hands_result, "multi_hand_landmarks", None)
     score = 0.0
     handedness = getattr(hands_result, "multi_handedness", None)
     if handedness:
         score = handedness[0].classification[0].score
+    obs["hand"] = bool(hand_lists)
+    obs["score"] = round(score, 2)
+    hand_hit = False
+    if hand_lists:
+        points = hand_lists[0].landmark
+        left = min(point.x for point in points)
+        right = max(point.x for point in points)
+        top = min(point.y for point in points)
+        bottom = max(point.y for point in points)
+        overlaps = (
+            score >= HAND_SCORE_MIN
+            and left < zone["right"]
+            and right > zone["left"]
+            and top < zone["bottom"]
+            and bottom > zone["top"]
+        )
+        obs["in_zone"] = overlaps
+        hand_hit = overlaps
 
-    face_lists = getattr(face_result, "multi_face_landmarks", None)
-    if not face_lists:
-        return {"hand": True, "score": round(score, 2), "drinking": False,
-                "why": "no_face"}
+    pose_landmarks = getattr(pose_result, "pose_landmarks", None)
+    pose_hit = False
+    best_wrist = None
+    if pose_landmarks:
+        body = pose_landmarks.landmark
+        shoulder_span = max(abs(body[12].x - body[11].x), 1e-4)
+        shoulder_line = max(body[11].y, body[12].y)
+        radius = max(WRIST_MOUTH_RATIO * shoulder_span, MIN_DRINK_RADIUS)
+        cx, cy = zone["centre"]
+        for index in (15, 16):
+            wrist = body[index]
+            visibility = getattr(wrist, "visibility", 1.0)
+            distance = ((wrist.x - cx) ** 2 + (wrist.y - cy) ** 2) ** 0.5
+            if best_wrist is None or distance < best_wrist[0]:
+                best_wrist = (distance, visibility, wrist.y < shoulder_line)
+            if (
+                visibility >= POSE_MIN_VISIBILITY
+                and distance < radius
+                and wrist.y < shoulder_line + POSE_SHOULDER_GATE
+            ):
+                pose_hit = True
+    if best_wrist:
+        obs["wrist_d"] = round(best_wrist[0], 3)
+        obs["wrist_vis"] = round(best_wrist[1], 2)
+    obs["pose"] = pose_hit
 
-    face = face_lists[0].landmark
-    mouth_x = (face[61].x + face[291].x) / 2
-    mouth_y = (face[61].y + face[291].y) / 2
-    nose_y = face[1].y
-    chin_y = face[152].y
-    span = abs(face[454].x - face[234].x)
-    height = max(abs(chin_y - face[10].y), 1e-4)
-
-    points = hand_lists[0].landmark
-    centre_x = sum(point.x for point in points) / len(points)
-    centre_y = sum(point.y for point in points) / len(points)
-
-    checks = {
-        "score": score >= HAND_SCORE_MIN,
-        "level": centre_y > nose_y - 0.05 * height,
-        "near_mouth": (
-            abs(centre_x - mouth_x) < 1.1 * span
-            and mouth_y - 0.05 * height < centre_y < chin_y + 0.9 * height
-        ),
-    }
-    return {
-        "hand": True,
-        "score": round(score, 2),
-        "y": round(centre_y, 2),
-        **checks,
-        "drinking": all(checks.values()),
-    }
+    obs["drinking"] = hand_hit or pose_hit
+    return obs
 
 
 class DrinkDetector:
-    """Detects drinking as a verified hand-at-the-mouth gesture.
+    """Detects drinking as sustained contact between vessel and lips.
 
-    Hand detections are cross-checked against face landmarks so phantom
-    detections on faces or desks never count. The gesture must hold for
-    DRINK_GESTURE_SECONDS before consider() fires once and re-arms;
-    progress decays gently between sips instead of resetting.
+    Two trackers vote on whether anything cup-like is at the mouth; the
+    verdict must hold for DRINK_GESTURE_SECONDS before consider() fires
+    once and re-arms. Progress decays gently between sips instead of
+    resetting.
     """
 
     def __init__(self):
@@ -556,12 +622,13 @@ class DrinkDetector:
             with QuietStderr():
                 face_result = _get_face_mesh().process(image)
                 hands_result = _get_hands().process(image)
+                pose_result = _get_pose().process(image)
         except Exception as error:
             self.sustained = 0.0
             self.last_obs = {"error": f"{type(error).__name__}: {error}"[:140]}
             return False
 
-        self.last_obs = _drink_metrics(hands_result, face_result)
+        self.last_obs = _drink_metrics(hands_result, pose_result, face_result)
         drinking = bool(self.last_obs.get("drinking"))
 
         if drinking:
@@ -1180,16 +1247,18 @@ class StepAwayApp:
                 self.warned = True
 
     def _warm_drink_model(self) -> None:
-        """Load the hand model on the main thread before loops start.
+        """Load the drink models on the main thread before loops start.
 
         MediaPipe binds its compute context to the creating thread on
-        macOS, so the model must be created and first used here rather
+        macOS, so the models must be created and first used here rather
         than in a helper thread, or every later call would fail.
         """
         try:
             import numpy as np
 
-            _get_hands().process(np.zeros((64, 64, 3), dtype=np.uint8))
+            blank = np.zeros((64, 64, 3), dtype=np.uint8)
+            _get_hands().process(blank)
+            _get_pose().process(blank)
             stamp = time.strftime("%H:%M:%S")
             print(f"[{stamp}] Drink detector ready.")
         except Exception as error:
