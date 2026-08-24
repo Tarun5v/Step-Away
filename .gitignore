@@ -13,6 +13,7 @@ build/
 out/
 *.apk
 *.aab
+*.spec
 
 # Logs
 *.log

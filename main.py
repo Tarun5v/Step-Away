@@ -1321,7 +1321,7 @@ class StepAwayApp:
         return 0
 
 
-if __name__ == "__main__":
+def cli(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Step-Away presence guard")
     parser.add_argument(
         "--debug", action="store_true", help="print every webcam check result"
@@ -1335,7 +1335,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--demo", action="store_true", help="shrink wellness timers to seconds for testing"
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.doctor:
-        sys.exit(run_doctor())
-    sys.exit(StepAwayApp(debug=args.debug, show_preview=args.preview, demo=args.demo).run())
+        return run_doctor()
+    return StepAwayApp(debug=args.debug, show_preview=args.preview, demo=args.demo).run()
+
+
+if __name__ == "__main__":
+    sys.exit(cli())
