@@ -4,10 +4,13 @@ Watches for you at the desk, locks the machine when you step away,
 and nudges you to stretch after long focus sessions.
 """
 
+import json
 import subprocess
 import sys
 import threading
 import time
+from datetime import date, timedelta
+from pathlib import Path
 
 import cv2
 import mediapipe as mp
@@ -17,6 +20,10 @@ CAMERA_INDEX = 0
 CHECK_INTERVAL_SECONDS = 3
 ABSENCE_LOCK_SECONDS = 10
 ABSENCE_WARNING_SECONDS = 5
+FOCUS_REMINDER_MINUTES = 50
+BREAK_THRESHOLD_SECONDS = 300
+STATS_FILE = "step_away_stats.json"
+SAVE_INTERVAL_SECONDS = 60
 
 
 class PresenceMonitor(threading.Thread):
@@ -111,18 +118,110 @@ def lock_screen() -> bool:
     return True
 
 
+def send_stretch_notification() -> None:
+    """Post a desktop reminder to stand up and stretch."""
+    title = "Step-Away"
+    message = "You have been focused for a while. Time to stretch and hydrate!"
+    try:
+        from plyer import notification
+
+        notification.notify(title=title, message=message, timeout=10)
+    except Exception:
+        script = f'display notification "{message}" with title "{title}"'
+        subprocess.run(["osascript", "-e", script], capture_output=True)
+
+
+def format_duration(total_seconds: int) -> str:
+    minutes, seconds = divmod(int(total_seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
+
+
+class StatsStore:
+    """Persists daily focus time, reminders and breaks to a local JSON file."""
+
+    def __init__(self, path: str = STATS_FILE):
+        self.path = Path(path)
+        self.days = {}
+        self._load()
+
+    def _load(self) -> None:
+        if not self.path.exists():
+            return
+        try:
+            payload = json.loads(self.path.read_text())
+            self.days = payload.get("days", {})
+        except (json.JSONDecodeError, OSError):
+            print("Stats file was unreadable; starting a fresh one.")
+            self.days = {}
+
+    def save(self) -> None:
+        try:
+            self.path.write_text(json.dumps({"days": self.days}, indent=2))
+        except OSError as error:
+            print(f"Could not save stats: {error}")
+
+    def _today(self) -> dict:
+        return self.days.setdefault(
+            date.today().isoformat(), {"focus_seconds": 0, "reminders": 0, "breaks": 0}
+        )
+
+    def add_focus(self, seconds: float) -> None:
+        self._today()["focus_seconds"] += int(seconds)
+
+    def record_reminder(self) -> None:
+        self._today()["reminders"] += 1
+
+    def record_break(self) -> None:
+        self._today()["breaks"] += 1
+
+    def current_streak(self) -> int:
+        active = {
+            day for day, stats in self.days.items() if stats.get("focus_seconds", 0) > 0
+        }
+        day = date.today()
+        if day.isoformat() not in active:
+            day -= timedelta(days=1)
+            if day.isoformat() not in active:
+                return 0
+        streak = 0
+        while day.isoformat() in active:
+            streak += 1
+            day -= timedelta(days=1)
+        return streak
+
+    def summary_report(self) -> str:
+        today = self._today()
+        streak = self.current_streak()
+        lines = [
+            "Today's report",
+            f"  Focus time:     {format_duration(today['focus_seconds'])}",
+            f"  Stretch nudges: {today['reminders']}",
+            f"  Breaks taken:   {today['breaks']}",
+            f"  Current streak: {streak} day{'s' if streak != 1 else ''}",
+        ]
+        return "\n".join(lines)
+
+
 class StepAwayApp:
     """Ties presence monitoring into security and wellness behaviours."""
 
     def __init__(self):
         self.monitor = PresenceMonitor()
+        self.stats = StatsStore()
         self.absent_since = None
         self.locked = False
         self.warned = False
+        self.focus_start = None
+        self.break_counted = True
+        self.last_tick = time.time()
+        self.last_save = time.time()
 
-    def _handle_presence(self) -> None:
-        now = time.time()
-
+    def _update_security(self, now: float) -> None:
         if self.monitor.face_present:
             if self.locked:
                 stamp = time.strftime("%H:%M:%S")
@@ -148,13 +247,57 @@ class StepAwayApp:
                 print(f"Desk empty - locking in {remaining}s. Hop back in view to cancel.")
                 self.warned = True
 
+    def _update_wellness(self, now: float, delta: float) -> None:
+        if self.monitor.face_present:
+            self.stats.add_focus(delta)
+
+            if self.focus_start is None:
+                self.focus_start = now
+            elif now - self.focus_start >= FOCUS_REMINDER_MINUTES * 60:
+                send_stretch_notification()
+                self.stats.record_reminder()
+                stamp = time.strftime("%H:%M:%S")
+                minutes = FOCUS_REMINDER_MINUTES
+                print(f"[{stamp}] {minutes} minutes of focus - stretch nudge sent.")
+                self.focus_start = now
+            return
+
+        if self.absent_since is None:
+            return
+        if now - self.absent_since >= BREAK_THRESHOLD_SECONDS and not self.break_counted:
+            self.stats.record_break()
+            self.break_counted = True
+            stamp = time.strftime("%H:%M:%S")
+            print(f"[{stamp}] Break logged. Nice step away!")
+
+    def _reset_focus_session(self) -> None:
+        if self.focus_start is not None and self.monitor.face_present:
+            return
+        if not self.monitor.face_present:
+            self.focus_start = None
+            self.break_counted = False
+
     def run(self) -> int:
         print("Step-Away is starting up. Press Ctrl+C to quit.")
+        print(f"Streak so far: {self.stats.current_streak()} day(s).")
+        self.stats.save()
         self.monitor.start()
 
+        exit_code = 0
         try:
             while self.monitor.is_alive():
-                self._handle_presence()
+                now = time.time()
+                delta = min(now - self.last_tick, CHECK_INTERVAL_SECONDS * 2)
+                self.last_tick = now
+
+                self._update_security(now)
+                self._update_wellness(now, delta)
+                self._reset_focus_session()
+
+                if now - self.last_save >= SAVE_INTERVAL_SECONDS:
+                    self.stats.save()
+                    self.last_save = now
+
                 time.sleep(1)
         except KeyboardInterrupt:
             pass
@@ -164,10 +307,13 @@ class StepAwayApp:
 
         if self.monitor.error:
             print(f"Stopped: {self.monitor.error}")
-            return 1
+            exit_code = 1
 
+        self.stats.save()
+        print()
+        print(self.stats.summary_report())
         print("Step-Away closed. See you soon!")
-        return 0
+        return exit_code
 
 
 if __name__ == "__main__":
