@@ -115,10 +115,11 @@ TERMINAL_APPS = {
 FOCUS_REMINDER_MINUTES = 50
 EYE_RULE_MINUTES = 20
 DAILY_WATER_GOAL = 8
-DRINK_GESTURE_SECONDS = 2.0
+DRINK_GESTURE_SECONDS = 1.5
 DRINK_DEDUP_SECONDS = 4 * 60
 WRIST_MOUTH_RATIO = 0.6
-MIN_DRINK_RADIUS = 0.13
+MIN_DRINK_RADIUS = 0.16
+SHOULDER_GATE_MARGIN = 0.12
 BREAK_THRESHOLD_SECONDS = 300
 BREAK_AWAY_SECONDS = 60
 DEMO_BREAK_AWAY_SECONDS = 5
@@ -481,8 +482,8 @@ def _get_pose():
     return _pose
 
 
-def _is_drinking(landmarks) -> bool:
-    """True when a hand is raised into drinking position near the face.
+def _gesture_metrics(landmarks) -> dict:
+    """Measure drinking signals from pose landmarks and return the verdict.
 
     The wrist-to-face distance is scaled by shoulder width but floored at
     an absolute minimum, because tight head-and-shoulders webcam framing
@@ -499,17 +500,41 @@ def _is_drinking(landmarks) -> bool:
     nose = landmarks[0]
     radius = max(WRIST_MOUTH_RATIO * span, MIN_DRINK_RADIUS)
 
-    for index in (15, 16):
+    best = None
+    for index, side in ((15, "L"), (16, "R")):
         wrist = landmarks[index]
-        if getattr(wrist, "visibility", 1.0) < 0.4:
-            continue
+        visibility = getattr(wrist, "visibility", 1.0)
         d_mouth = ((wrist.x - mouth_x) ** 2 + (wrist.y - mouth_y) ** 2) ** 0.5
         d_nose = ((wrist.x - nose.x) ** 2 + (wrist.y - nose.y) ** 2) ** 0.5
-        if (
-            d_mouth < radius or d_nose < radius
-        ) and wrist.y < shoulder_line + 0.05:
-            return True
-    return False
+        raised = wrist.y < shoulder_line + SHOULDER_GATE_MARGIN
+        close = (d_mouth < radius or d_nose < radius) and raised
+        if close:
+            return {
+                "drinking": True,
+                "side": side,
+                "d_mouth": round(d_mouth, 3),
+                "d_nose": round(d_nose, 3),
+                "span": round(span, 3),
+            }
+        if best is None or min(d_mouth, d_nose) < best["min_d"]:
+            best = {
+                "min_d": min(d_mouth, d_nose),
+                "side": side,
+                "vis": round(visibility, 2),
+                "raised": raised,
+            }
+    return {
+        "drinking": False,
+        "side": best["side"] if best else "-",
+        "d_mouth": round(best["min_d"], 3) if best else -1,
+        "span": round(span, 3),
+        "vis": best["vis"] if best else 0.0,
+        "raised": best["raised"] if best else False,
+    }
+
+
+def _is_drinking(landmarks) -> bool:
+    return _gesture_metrics(landmarks)["drinking"]
 
 
 class DrinkDetector:
@@ -521,6 +546,7 @@ class DrinkDetector:
 
     def __init__(self):
         self.sustained = 0.0
+        self.last_obs = {}
 
     def consider(self, frame, seconds: float) -> bool:
         import cv2 as _cv2
@@ -532,12 +558,19 @@ class DrinkDetector:
                 result = pose.process(image)
         except Exception:
             self.sustained = 0.0
+            self.last_obs = {"error": True}
             return False
 
         landmarks = (
             result.pose_landmarks.landmark if result.pose_landmarks else None
         )
-        if landmarks is not None and _is_drinking(landmarks):
+        if landmarks is None:
+            self.last_obs = {"person": False}
+        else:
+            self.last_obs = _gesture_metrics(landmarks)
+
+        drinking = bool(self.last_obs.get("drinking"))
+        if drinking:
             self.sustained += min(max(seconds, 0.0), 2.0)
         else:
             # Micro-dips between sips should not wipe accumulated progress;
@@ -1173,10 +1206,15 @@ class StepAwayApp:
         if frame is None:
             return
         drinking_now = self.drink_detector.consider(frame, gap)
-        if drinking_now or self.drink_detector.sustained > 0.5:
+        self.pose_reads = getattr(self, "pose_reads", 0) + 1
+        obs = dict(self.drink_detector.last_obs)
+        obs["held"] = round(self.drink_detector.sustained, 1)
+        if drinking_now or self.drink_detector.sustained > 0.5 or (
+            self.pose_reads % 5 == 0 and self.monitor.face_present
+        ):
             stamp = time.strftime("%H:%M:%S")
             print(
-                f"[{stamp}] drink: {self.drink_detector.sustained:.1f}s"
+                f"[{stamp}] drink: {obs}"
                 f"{' - LOGGED' if drinking_now else ''}"
             )
         if not drinking_now:
