@@ -88,7 +88,7 @@ Tune the behaviour by editing the constants at the top of `main.py`:
 | `FOCUS_REMINDER_MINUTES` | `50`    | Uninterrupted focus minutes per stretch nudge |
 | `EYE_RULE_MINUTES`       | `20`    | Minutes between 20-20-20 eye-rest screens     |
 | `DAILY_WATER_GOAL`       | `8`     | Glasses per day needed to extend the water streak |
-| `DRINK_GESTURE_SECONDS`  | `1.5`   | How long a raised hand must hold to count |
+| `DRINK_GESTURE_SECONDS`  | `2`     | How long a verified hand-at-mouth must hold to count |
 | `DRINK_DEDUP_SECONDS`    | `240`   | Minimum gap between auto-logged glasses |
 | `BREAK_AWAY_SECONDS`     | `60`    | Away-from-desk seconds before the break screen releases |
 | `INPUT_ACTIVITY_GRACE_SECONDS` | `5` | Mouse/keyboard idle gap still counted as presence |
