@@ -12,6 +12,8 @@ stretch when you have been focused for too long.
   uninterrupted focus so you remember to stand up and stretch.
 - **20-20-20 eye rule** - every 20 minutes at the desk you get an eye-rest
   nudge: look 6 metres away for 20 seconds to fight eye strain.
+- **Hydration tracking** - drink-water nudges every 45 minutes, and press `w`
+  in the preview window to log each glass you drink.
 - **Break tracking** - stays away long enough (5+ minutes) and it counts as a
   logged break.
 - **Daily stats & streaks** - focus time, nudges, breaks and day streaks are
@@ -70,6 +72,7 @@ Tune the behaviour by editing the constants at the top of `main.py`:
 | `PREVIEW_TARGET_FPS`     | `60`    | Frame rate target for the `--preview` window  |
 | `FOCUS_REMINDER_MINUTES` | `50`    | Uninterrupted focus minutes per stretch nudge |
 | `EYE_RULE_MINUTES`       | `20`    | Minutes between 20-20-20 eye-rest nudges      |
+| `HYDRATION_INTERVAL_MINUTES` | `45`| Minutes between drink-water nudges            |
 | `BREAK_THRESHOLD_SECONDS`| `300`   | Away-time that counts as a real break         |
 
 ## Privacy

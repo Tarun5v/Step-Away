@@ -68,12 +68,14 @@ LOCK_COMMAND_TIMEOUT_SECONDS = 5
 LOCK_RETRY_SECONDS = 30
 FOCUS_REMINDER_MINUTES = 50
 EYE_RULE_MINUTES = 20
+HYDRATION_INTERVAL_MINUTES = 45
 BREAK_THRESHOLD_SECONDS = 300
 DAY_DEFAULTS = {
     "focus_seconds": 0,
     "reminders": 0,
     "breaks": 0,
     "eye_rests": 0,
+    "water_glasses": 0,
 }
 STATS_FILE = "step_away_stats.json"
 SAVE_INTERVAL_SECONDS = 60
@@ -325,6 +327,14 @@ class StatsStore:
     def record_eye_rest(self) -> None:
         self._today()["eye_rests"] += 1
 
+    def record_water(self) -> int:
+        today = self._today()
+        today["water_glasses"] += 1
+        return today["water_glasses"]
+
+    def water_today(self) -> int:
+        return self._today().get("water_glasses", 0)
+
     def record_break(self) -> None:
         self._today()["breaks"] += 1
 
@@ -351,6 +361,7 @@ class StatsStore:
             f"  Focus time:     {format_duration(today['focus_seconds'])}",
             f"  Stretch nudges: {today['reminders']}",
             f"  Eye-rest nudges: {today['eye_rests']}",
+            f"  Water logged:   {today.get('water_glasses', 0)} glass(es)",
             f"  Breaks taken:   {today['breaks']}",
             f"  Current streak: {streak} day{'s' if streak != 1 else ''}",
         ]
@@ -445,6 +456,7 @@ class StepAwayApp:
         self.warned = False
         self.focus_start = None
         self.eye_rest_start = None
+        self.hydrate_start = None
         self.break_counted = True
         self.next_lock_attempt = 0.0
         self.last_tick = time.time()
@@ -504,6 +516,14 @@ class StepAwayApp:
                 stamp = time.strftime("%H:%M:%S")
                 print(f"[{stamp}] 20-20-20 eye-rest nudge sent.")
                 self.eye_rest_start = now
+
+            if self.hydrate_start is None:
+                self.hydrate_start = now
+            elif now - self.hydrate_start >= HYDRATION_INTERVAL_MINUTES * 60:
+                send_stretch_notification(message="Time to sip some water - stay hydrated!")
+                stamp = time.strftime("%H:%M:%S")
+                print(f"[{stamp}] Hydration nudge sent (press w in preview to log a glass).")
+                self.hydrate_start = now
             return
 
         if self.absent_since is None:
@@ -520,6 +540,7 @@ class StepAwayApp:
         if not self.monitor.face_present:
             self.focus_start = None
             self.eye_rest_start = None
+            self.hydrate_start = None
             self.break_counted = False
 
     def _announce(self, present: bool) -> None:
@@ -550,6 +571,15 @@ class StepAwayApp:
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
             (80, 200, 80),
+            2,
+        )
+        cv2.putText(
+            frame,
+            f"water: {self.stats.water_today()} glasses (w to log)",
+            (10, 82),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (200, 200, 80),
             2,
         )
         cv2.imshow(PREVIEW_WINDOW_TITLE, frame)
@@ -651,7 +681,11 @@ class StepAwayApp:
                     self._draw_preview_frame(frame, boxes, fps)
 
                     key = cv2.waitKey(1) & 0xFF
-                    if key in (ord("q"), 0x1B):
+                    if key == ord("w"):
+                        glasses = self.stats.record_water()
+                        stamp = time.strftime("%H:%M:%S")
+                        print(f"[{stamp}] Logged a glass of water ({glasses} today).")
+                    elif key in (ord("q"), 0x1B):
                         break
 
                     if now - self.last_save >= SAVE_INTERVAL_SECONDS:
