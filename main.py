@@ -20,6 +20,8 @@ CAMERA_INDEX = 0
 CHECK_INTERVAL_SECONDS = 3
 ABSENCE_LOCK_SECONDS = 10
 ABSENCE_WARNING_SECONDS = 5
+LOCK_COMMAND_TIMEOUT_SECONDS = 5
+LOCK_RETRY_SECONDS = 30
 FOCUS_REMINDER_MINUTES = 50
 BREAK_THRESHOLD_SECONDS = 300
 STATS_FILE = "step_away_stats.json"
@@ -69,7 +71,7 @@ class PresenceMonitor(threading.Thread):
             self._running = False
             return
 
-        with mp.solutions.face_detection.FaceDetector(
+        with mp.solutions.face_detection.FaceDetection(
             model_selection=0, min_detection_confidence=0.5
         ) as detector:
             failed_reads = 0
@@ -108,11 +110,23 @@ def lock_screen() -> bool:
         'tell application "System Events" to '
         'keystroke "q" using {command down, control down}'
     )
-    result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=LOCK_COMMAND_TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError:
+        print("Automatic locking needs macOS (osascript was not found).")
+        return False
+    except subprocess.TimeoutExpired:
+        print("The screen lock command timed out.")
+        return False
     if result.returncode != 0:
         print(
             "Could not lock the screen automatically. Grant Accessibility "
-            "permission to your terminal app in System Settings > Privacy & Security.",
+            "permission to your terminal app in System Settings > Privacy & Security."
         )
         return False
     return True
@@ -218,6 +232,7 @@ class StepAwayApp:
         self.warned = False
         self.focus_start = None
         self.break_counted = True
+        self.next_lock_attempt = 0.0
         self.last_tick = time.time()
         self.last_save = time.time()
 
@@ -229,6 +244,7 @@ class StepAwayApp:
             self.absent_since = None
             self.locked = False
             self.warned = False
+            self.next_lock_attempt = 0.0
             return
 
         if self.absent_since is None:
@@ -237,11 +253,14 @@ class StepAwayApp:
 
         absence = now - self.absent_since
         if not self.locked:
-            if absence >= ABSENCE_LOCK_SECONDS:
+            if absence >= ABSENCE_LOCK_SECONDS and now >= self.next_lock_attempt:
                 stamp = time.strftime("%H:%M:%S")
                 print(f"[{stamp}] No one at the desk - locking the screen.")
-                lock_screen()
-                self.locked = True
+                if lock_screen():
+                    self.locked = True
+                else:
+                    print(f"Lock failed - retrying every {LOCK_RETRY_SECONDS}s.")
+                    self.next_lock_attempt = now + LOCK_RETRY_SECONDS
             elif absence >= ABSENCE_WARNING_SECONDS and not self.warned:
                 remaining = round(ABSENCE_LOCK_SECONDS - absence)
                 print(f"Desk empty - locking in {remaining}s. Hop back in view to cancel.")
@@ -307,6 +326,9 @@ class StepAwayApp:
 
         if self.monitor.error:
             print(f"Stopped: {self.monitor.error}")
+            exit_code = 1
+        elif self.monitor.is_alive():
+            print("Warning: camera thread did not shut down cleanly.")
             exit_code = 1
 
         self.stats.save()
