@@ -6,6 +6,7 @@ and nudges you to stretch after long focus sessions.
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -42,6 +43,25 @@ First-time setup checklist:
   3. Notifications - allow them when macOS first asks (stretch reminders)
 Re-check anytime with: python main.py --doctor
 """
+
+
+class QuietStderr:
+    """Temporarily silence native C++ log noise (MediaPipe/absl) on fd 2."""
+
+    def __enter__(self):
+        sys.stdout.flush()
+        sys.stderr.flush()
+        self._saved = os.dup(2)
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, 2)
+        os.close(devnull)
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        sys.stderr.flush()
+        os.dup2(self._saved, 2)
+        os.close(self._saved)
+        return False
 
 
 class PresenceVote:
@@ -161,24 +181,11 @@ class PresenceMonitor(threading.Thread):
             self._running = False
             return
 
-        with mp.solutions.face_detection.FaceDetection(
+        with QuietStderr(), mp.solutions.face_detection.FaceDetection(
             model_selection=0, min_detection_confidence=MIN_DETECTION_CONFIDENCE
         ) as detector:
             failed_reads = 0
             while self._running:
-                grabbed, frame = capture.read()
-                if not grabbed:
-                    failed_reads += 1
-                    if failed_reads >= 5:
-                        self.error = (
-                            "Camera stopped delivering frames. "
-                            "Check macOS camera permission for your terminal app."
-                        )
-                        break
-                    time.sleep(CHECK_INTERVAL_SECONDS)
-                    continue
-
-                failed_reads = 0
                 frame = self._read_fresh_frame(capture)
                 if frame is None:
                     failed_reads += 1
@@ -191,7 +198,9 @@ class PresenceMonitor(threading.Thread):
                     time.sleep(CHECK_INTERVAL_SECONDS)
                     continue
 
-                raw_present, boxes = self._detect_face(detector, frame)
+                failed_reads = 0
+                with QuietStderr():
+                    raw_present, boxes = self._detect_face(detector, frame)
                 motion = self._motion_score(frame)
                 self.vote.record(raw_present)
                 with self._frame_lock:
@@ -285,11 +294,12 @@ def _get_face_mesh():
         if _face_mesh is None:
             import mediapipe as mp
 
-            _face_mesh = mp.solutions.face_mesh.FaceMesh(
-                max_num_faces=1,
-                min_detection_confidence=MIN_DETECTION_CONFIDENCE,
-                min_tracking_confidence=0.5,
-            )
+            with QuietStderr():
+                _face_mesh = mp.solutions.face_mesh.FaceMesh(
+                    max_num_faces=1,
+                    min_detection_confidence=MIN_DETECTION_CONFIDENCE,
+                    min_tracking_confidence=0.5,
+                )
     return _face_mesh
 
 
@@ -303,7 +313,8 @@ def gaze_on_screen(frame) -> bool:
 
     detector_mesh = _get_face_mesh()
     image = _cv2.cvtColor(frame, _cv2.COLOR_BGR2RGB)
-    result = detector_mesh.process(image)
+    with QuietStderr():
+        result = detector_mesh.process(image)
     if not result.multi_face_landmarks:
         return False
 
@@ -650,7 +661,7 @@ def run_doctor() -> int:
 
     print("- Face detection : ", end="", flush=True)
     try:
-        with mp.solutions.face_detection.FaceDetection(
+        with QuietStderr(), mp.solutions.face_detection.FaceDetection(
             model_selection=0, min_detection_confidence=MIN_DETECTION_CONFIDENCE
         ) as detector:
             blank = np.zeros((240, 320, 3), dtype=np.uint8)
