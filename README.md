@@ -12,7 +12,8 @@ stretch when you have been focused for too long.
   fades into a full-screen blurred break card, Screen Time style: "You've
   reached your focus limit. Stand up, stretch, breathe."
 - **20-20-20 eye rule** - every 20 minutes at the desk a blurred eye-rest
-  screen appears: look 6 metres away for 20 seconds to fight eye strain.
+  screen appears: look 6 metres away for 20 seconds. And yes, it can tell
+  when you are still watching - expect to be called out.
 - **Hydration tracking** - press `w` in the preview window to log each glass
   of water you drink; totals live in your daily stats.
 - **Break tracking** - stays away long enough (5+ minutes) and it counts as a
