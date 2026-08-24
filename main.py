@@ -88,10 +88,13 @@ class PresenceVote:
     def tally(self):
         with self._lock:
             return sum(self._hits), len(self._hits)
+
+
 ABSENCE_LOCK_SECONDS = 10
 ABSENCE_WARNING_SECONDS = 5
 LOCK_COMMAND_TIMEOUT_SECONDS = 5
 LOCK_RETRY_SECONDS = 30
+INPUT_ACTIVITY_GRACE_SECONDS = 5.0
 TERMINAL_APPS = {
     "Terminal",
     "iTerm2",
@@ -102,7 +105,6 @@ TERMINAL_APPS = {
     "Ghostty",
     "WezTerm",
 }
-LOCK_RETRY_SECONDS = 30
 FOCUS_REMINDER_MINUTES = 50
 EYE_RULE_MINUTES = 20
 BREAK_THRESHOLD_SECONDS = 300
@@ -111,6 +113,7 @@ DEMO_BREAK_AWAY_SECONDS = 5
 EYE_REST_AWAY_SECONDS = 20
 DEMO_EYE_REST_AWAY_SECONDS = 4
 OVERLAY_COOLDOWN_SECONDS = 60
+OVERLAY_FOCUS_GUARD_SECONDS = 0.25
 EYE_REST_POLL_SECONDS = 1.0
 EYE_REST_NAG_STEP_SECONDS = 4.0
 STRETCH_NAG_STEP_SECONDS = 6.0
@@ -277,6 +280,25 @@ class PresenceMonitor(threading.Thread):
         tag = "hit" if hit else "miss"
         stamp = time.strftime("%H%M%S")
         cv2.imwrite(str(out_dir / f"check_{stamp}_{tag}_{self._snapshot_index}.jpg"), frame)
+
+
+def _input_idle_seconds():
+    """Seconds since the last mouse/keyboard event, or None when unknown.
+
+    Uses CoreGraphics session state - read-only, no permissions needed.
+    """
+    try:
+        core_graphics = ctypes.CDLL(
+            "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics"
+        )
+        core_graphics.CGEventSourceSecondsSinceLastEventType.restype = ctypes.c_double
+        core_graphics.CGEventSourceSecondsSinceLastEventType.argtypes = [
+            ctypes.c_int32,
+            ctypes.c_uint32,
+        ]
+        return core_graphics.CGEventSourceSecondsSinceLastEventType(0, 0xFFFFFFFF)
+    except Exception:
+        return None
 
 
 def _frontmost_app_name():
@@ -562,6 +584,12 @@ def _load_overlay_ui():
         def tick_(self, timer):
             AppKit.NSApplication.sharedApplication().stopModal()
 
+        def guardFocus_(self, timer):
+            try:
+                self.guard_focus(timer)
+            except Exception:
+                pass
+
         def refreshTitle_(self, timer):
             try:
                 replacement = self.on_title_refresh()
@@ -615,6 +643,7 @@ def show_break_overlay(
     window.setBackgroundColor_(AppKit.NSColor.clearColor())
     window.setCollectionBehavior_(
         AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces
+        | AppKit.NSWindowCollectionBehaviorStationary
     )
 
     blur = AppKit.NSVisualEffectView.alloc().initWithFrame_(
@@ -670,6 +699,26 @@ def show_break_overlay(
         coordinator.title_field = title_field
         poll_timer = schedule(EYE_REST_POLL_SECONDS, True, "refreshTitle:")
 
+    # Kiosk lockdown: hide the dock and menu bar, block app switching,
+    # force quit and logout, then keep reclaiming focus so nothing else
+    # can take the screen while the break card is up.
+    kiosk_mask = (
+        AppKit.NSApplicationPresentationHideDock
+        | AppKit.NSApplicationPresentationHideMenuBar
+        | AppKit.NSApplicationPresentationDisableProcessSwitching
+        | AppKit.NSApplicationPresentationDisableForceQuit
+        | AppKit.NSApplicationPresentationDisableSessionTermination
+    )
+    previous_presentation = app.presentationOptions()
+    app.setPresentationOptions_(kiosk_mask)
+
+    def guard_focus(timer):
+        app.activateIgnoringOtherApps_(True)
+        window.makeKeyAndOrderFront_(None)
+
+    focus_guard = schedule(OVERLAY_FOCUS_GUARD_SECONDS, True, "guardFocus:")
+    coordinator.guard_focus = guard_focus
+
     window.makeKeyAndOrderFront_(None)
     app.activateIgnoringOtherApps_(True)
     try:
@@ -679,6 +728,8 @@ def show_break_overlay(
             close_timer.invalidate()
         if poll_timer is not None:
             poll_timer.invalidate()
+        focus_guard.invalidate()
+        app.setPresentationOptions_(previous_presentation)
         window.orderOut_(None)
 
 
@@ -889,17 +940,32 @@ class StepAwayApp:
             self.eye_rest_required_away = EYE_REST_AWAY_SECONDS
             self.overlay_cooldown = OVERLAY_COOLDOWN_SECONDS
         self.last_overlay_closed_at = 0.0
+        self.input_hold_note_shown = False
 
     def _update_security(self, now: float) -> None:
-        if self.monitor.face_present:
-            if self.locked:
+        face = self.monitor.face_present
+        idle = None if face else _input_idle_seconds()
+        attended = face or (
+            idle is not None and idle < INPUT_ACTIVITY_GRACE_SECONDS
+        )
+
+        if attended:
+            if face:
+                if self.locked or self.absent_since is not None:
+                    stamp = time.strftime("%H:%M:%S")
+                    print(f"[{stamp}] Welcome back! Security guard re-armed.")
+                self.input_hold_note_shown = False
+            elif not self.input_hold_note_shown:
                 stamp = time.strftime("%H:%M:%S")
-                print(f"[{stamp}] Welcome back! Security guard re-armed.")
+                print(f"[{stamp}] Out of frame, but input is active - staying unlocked.")
+                self.input_hold_note_shown = True
             self.absent_since = None
             self.locked = False
             self.warned = False
             self.next_lock_attempt = 0.0
             return
+
+        self.input_hold_note_shown = False
 
         if self.absent_since is None:
             self.absent_since = now

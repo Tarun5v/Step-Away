@@ -7,7 +7,12 @@ stretch when you have been focused for too long.
 ## Features
 
 - **Auto-lock security** - after 5 seconds away you get a warning; if you are
-  still gone at the 10-second mark, the screen locks with `Cmd+Ctrl+Q`.
+  still gone at the 10-second mark, the screen locks. Mouse or keyboard
+  activity counts as presence too: if you are out of frame but actively
+  using the machine, it stays unlocked.
+- **Kiosk-style wellness screens** - while a break or eye-rest card is up,
+  the dock and menu bar hide, app switching is blocked, and focus keeps
+  returning to the card until you press a key or click.
 - **Wellness breaks** - after 50 minutes of uninterrupted focus, the screen
   fades into a full-screen blurred break card that will not dismiss itself:
   it cycles through stretch instructions ("Stand up.", "Walk to the far
@@ -78,6 +83,8 @@ Tune the behaviour by editing the constants at the top of `main.py`:
 | `FOCUS_REMINDER_MINUTES` | `50`    | Uninterrupted focus minutes per stretch nudge |
 | `EYE_RULE_MINUTES`       | `20`    | Minutes between 20-20-20 eye-rest screens     |
 | `BREAK_AWAY_SECONDS`     | `60`    | Away-from-desk seconds before the break screen releases |
+| `INPUT_ACTIVITY_GRACE_SECONDS` | `5` | Mouse/keyboard idle gap still counted as presence |
+| `OVERLAY_FOCUS_GUARD_SECONDS`  | `0.25` | How often overlays reclaim focus while up |
 | `EYE_REST_AWAY_SECONDS`  | `20`    | Away-look seconds before the eye screen releases |
 | `OVERLAY_COOLDOWN_SECONDS`| `60`   | Minimum quiet gap between wellness screens    |
 | `BREAK_THRESHOLD_SECONDS`| `300`   | Away-time that counts as a real break         |
