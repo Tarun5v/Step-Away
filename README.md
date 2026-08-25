@@ -6,11 +6,18 @@ stretch when you have been focused for too long.
 
 ## Download & Run (no coding needed)
 
-1. Grab `Step-Away-macOS.zip` from the [latest release](https://github.com/Tarun5v/Step-Away/releases/latest).
-2. Unzip it and drag **Step Away** into your Applications folder.
-3. The first time you open it, macOS may warn that the app is from an unknown
-   developer: right-click the app and choose **Open**, then confirm. This only
-   happens once.
+1. Grab **`Step-Away-macOS.dmg`** from the
+   [latest release](https://github.com/Tarun5v/Step-Away/releases/latest)
+   and double-click it.
+2. Drag **Step Away** into your Applications folder, then open it from there.
+3. First launch only - if macOS says *"Apple can't check app for malicious
+   software"*:
+   1. Quit the dialog (**Done**), and do **not** delete the app.
+   2. Open **System Settings -> Privacy & Security**.
+   3. Scroll to **Security** and click **Open Anyway**, then **Open**
+      (the button stays available for about an hour after each attempt).
+   4. Enter your login password.
+   After this one-time approval the app opens like any other.
 4. Allow camera access when macOS asks - that is what powers the presence
    detection. Everything stays on your Mac; no video ever leaves it.
 
