@@ -684,7 +684,7 @@ def show_break_overlay(
     content.addSubview_(title_field)
     if subtitle:
         content.addSubview_(centered_label(0.47, 40, subtitle, 24, 0.85))
-    content.addSubview_(centered_label(0.10, 30, "Press any key or click to continue", 15, 0.55))
+    content.addSubview_(centered_label(0.10, 30, "Press any key or click to continue  |  Cmd+Q to quit", 15, 0.55))
 
     coordinator = Coordinator.alloc().init()
     from Foundation import NSTimer, NSRunLoop
@@ -708,14 +708,13 @@ def show_break_overlay(
         poll_timer = schedule(EYE_REST_POLL_SECONDS, True, "refreshTitle:")
 
     # Kiosk lockdown: hide the dock and menu bar, block app switching,
-    # force quit and logout, then keep reclaiming focus so nothing else
-    # can take the screen while the break card is up.
+    # then keep reclaiming focus so nothing else can take the screen
+    # while the break card is up.  Cmd+Q is left enabled so the user
+    # can always quit the app entirely.
     kiosk_mask = (
         AppKit.NSApplicationPresentationHideDock
         | AppKit.NSApplicationPresentationHideMenuBar
         | AppKit.NSApplicationPresentationDisableProcessSwitching
-        | AppKit.NSApplicationPresentationDisableForceQuit
-        | AppKit.NSApplicationPresentationDisableSessionTermination
     )
     previous_presentation = app.presentationOptions()
     app.setPresentationOptions_(kiosk_mask)
